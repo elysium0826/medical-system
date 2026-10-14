@@ -1,0 +1,31 @@
+# MySQL 8 development/test instance only; never load real patient data.
+# Application defaults DB_PASS='' while this container defaults to medical123.
+# Before db.sh/make: export DB_PASS=medical123 (or your MYSQL_ROOT_PASSWORD override).
+# Existing named-volume passwords are not changed by editing this variable.
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-medical123}
+      MYSQL_DATABASE: medical_db
+      MYSQL_ROOT_HOST: "%" # host TCP via Docker NAT; host port is loopback-only
+    ports:
+      - "127.0.0.1:3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - medical_mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=\"$$MYSQL_ROOT_PASSWORD\" mysql --protocol=TCP --host=127.0.0.1 --user=root --batch --skip-column-names --execute='SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  medical_mysql_data:
+# No automatic SQL mounts, no implicit test seed, and no automated volume removal.
+# docker compose down preserves data. Do NOT use down -v on a data-bearing instance.
+# Destructive SQL reset requires CONFIRM_RESET=yes and an exact allowed DB_NAME.

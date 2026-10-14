@@ -1,52 +1,53 @@
-# Prerequisites
-*.d
-
-# Object files
+# 构建产物
+/obj/*
+!/obj/.gitkeep
+/lib/*
+!/lib/.gitkeep
+/medical_system
 *.o
-*.ko
-*.obj
-*.elf
-
-# Linker output
-*.ilk
-*.map
-*.exp
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Libraries
-*.lib
 *.a
-*.la
-*.lo
-
-# Shared objects (inc. Windows DLLs)
-*.dll
 *.so
-*.so.*
-*.dylib
+core
 
-# Executables
-*.exe
-*.out
-*.app
-*.i*86
-*.x86_64
-*.hex
+# 运行期输出（导出 CSV、病历打印文本）
+/data/*
+!/data/.gitkeep
 
-# Debug files
-*.dSYM/
-*.su
-*.idb
-*.pdb
+# 本地 AI 规范、提示词与过程材料不上传
+**/.ai/
+/.agent/
+**/.agents/
+**/.codex/
+**/.dsh-progress/
+**/graphflow-out/
+**/.graphflow-cache/
+**/.graphflow/
+**/.agent/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+/CHANGELOG.md
+/docs/开发包约定.md
+/docs/design/
+/.github/CODEOWNERS
+/.github/PULL_REQUEST_TEMPLATE.md
+/.github/ISSUE_TEMPLATE/
 
-# Kernel Module Compile Results
-*.mod*
-*.cmd
-.tmp_versions/
-modules.order
-Module.symvers
-Mkfile.old
-dkms.conf
+# 意外嵌套的仓库与打包输出
+/medical-system/
+/delivery/
+*.stamp
+.env
+.env.*
+*.log
+/medical_system.exe
+/build/
+/dist/
+
+# 编辑器与系统垃圾
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

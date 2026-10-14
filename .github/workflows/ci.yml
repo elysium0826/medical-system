@@ -1,0 +1,64 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main, develop, master]
+  push:
+    branches: [main, develop, master]
+
+permissions:
+  contents: read
+
+jobs:
+  # Required status check: ci. Configure branch protection manually after first run.
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: medical_test
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -proot"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    env:
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_USER: root
+      DB_PASS: root
+      DB_NAME: medical_test
+      RUN_DB_TESTS: '1'
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      # Assumes medical-system is the repository root when D publishes the package.
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc make libmysqlclient-dev default-mysql-client clang-format python3
+      - name: Compile with warnings as errors
+        run: make
+      - name: Lint
+        run: make lint
+      - name: Check formatting without modifying files
+        run: make format-check
+      - name: Initialize isolated synthetic test database
+        run: make db-init && make db-migrate
+      - name: Run declared test layers
+        # The runner must disclose mock/scaffold vs real DB TCs and unimplemented TCs.
+        # Passing skeleton tests is not acceptance of 47 FRs / 52 SRS test cases.
+        run: make test
+      - name: Check data consistency
+        run: make check-data
+      - name: Seed isolated synthetic database for sanitizer demo
+        # Current runner does not DROP/clear the database. Initialization is idempotent.
+        # Seeding intentionally refuses a non-empty fixture. Never use a real database.
+        run: make db-init && make db-migrate && make db-seed
+      - name: Run ASan and UBSan demo plus tests
+        # asan target must execute demo.sh AND test, not compile only.
+        run: make asan

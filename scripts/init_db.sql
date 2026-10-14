@@ -1,0 +1,13 @@
+SOURCE scripts/ddl/01_patient.sql;
+SOURCE scripts/ddl/02_doctor.sql;
+SOURCE scripts/ddl/03_admin.sql;
+SOURCE scripts/ddl/04_medicine.sql;
+SOURCE scripts/ddl/05_stock_log.sql;
+SOURCE scripts/ddl/06_appointment.sql;
+SOURCE scripts/ddl/07_schedule.sql;
+SOURCE scripts/ddl/08_visit_record.sql;
+SOURCE scripts/ddl/09_prescription.sql;
+SOURCE scripts/ddl/10_presc_detail.sql;
+SOURCE scripts/ddl/11_presc_template.sql;
+SOURCE scripts/ddl/12_presc_template_item.sql;
+SOURCE scripts/ddl/13_medical_record.sql;
