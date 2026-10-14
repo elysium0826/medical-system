@@ -174,6 +174,18 @@ static void register_ut_patient(patient_t *p, const char *id_card, const char *n
     ASSERT_RC(patient_register(p, pid));
 }
 
+/* 会话 user_id 只有 DID_LEN 长，患者编号缓冲区是 PID_LEN；显式截断后写入。 */
+static void set_session_id(const char *id)
+{
+    size_t len = strlen(id);
+
+    if (len >= sizeof(g_session.user_id)) {
+        len = sizeof(g_session.user_id) - 1;
+    }
+    memcpy(g_session.user_id, id, len);
+    g_session.user_id[len] = '\0';
+}
+
 static void test_patient_db_flow(void)
 {
     patient_t p, got;
@@ -195,7 +207,7 @@ static void test_patient_db_flow(void)
     session_clear();
     ASSERT_EQ(patient_update_self(&got), ERR_PERM);
     g_session.role = ROLE_PATIENT;
-    snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", pid);
+    set_session_id(pid);
     snprintf(got.phone, sizeof(got.phone), "%s", "13900000000");
     ASSERT_RC(patient_update_self(&got));
 
@@ -206,7 +218,7 @@ static void test_patient_db_flow(void)
     ASSERT_EQ(total, 1);
     patient_list_free(list);
     g_session.role = ROLE_PATIENT;
-    snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", pid);
+    set_session_id(pid);
     ASSERT_RC(patient_query_all(NULL, 1, &list, &n, &total));
     ASSERT_EQ(n, 1);
     ASSERT_STR_EQ(list[0].patient_id, pid);
@@ -261,7 +273,10 @@ static void test_appointment_db_flow(void)
     char pid[PID_LEN], today[11], tomorrow[11];
     int n = 0, total = 0, aid, sid, sid2;
 
+    /* 先清本用例的旧数据：上次中途失败时收尾清理不会执行，重跑必须自净 */
     ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTAP%'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_visit_record WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_appointment WHERE doctor_id='UTD01'", NULL));
     ASSERT_RC(db_exec("DELETE FROM t_schedule WHERE doctor_id='UTD01'", NULL));
     register_ut_patient(&p, "UTAP000001", "挂号患者UT", pid);
     fetch_scalar("SELECT CURDATE()", today, sizeof(today));
@@ -271,12 +286,14 @@ static void test_appointment_db_flow(void)
 
     session_clear();
     g_session.role = ROLE_PATIENT;
-    snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", pid);
+    set_session_id(pid);
 
-    /* 挂号占号；同患者同日同医生重复 ERR_DUPLICATE；排班错 ERR_NOT_FOUND */
+    /* 挂号占号；同患者同日同医生重复 ERR_DUPLICATE；排班错 ERR_NOT_FOUND。
+       排班校验在"重复校验"之后，故换到没约过的日期，让流程走到排班检查这一关。 */
     ASSERT_RC(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "头痛"));
     ASSERT_EQ(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "头痛"), ERR_DUPLICATE);
-    ASSERT_EQ(appointment_add(pid, "UTD01", sid + 100000, today, SLOT_AM, "头痛"), ERR_NOT_FOUND);
+    ASSERT_EQ(appointment_add(pid, "UTD01", sid + 100000, tomorrow, SLOT_PM, "头痛"),
+              ERR_NOT_FOUND);
 
     ASSERT_RC(appointment_query_by_patient(pid, 1, &list, &n, &total));
     ASSERT_EQ(n, 1);
@@ -308,6 +325,8 @@ static void test_appointment_status_db_flow(void)
     int aid, sid;
 
     ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTNS%'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_visit_record WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_appointment WHERE doctor_id='UTD01'", NULL));
     ASSERT_RC(db_exec("DELETE FROM t_schedule WHERE doctor_id='UTD01'", NULL));
     register_ut_patient(&p, "UTNS000001", "爽约患者UT", pid);
     fetch_scalar("SELECT CURDATE()", today, sizeof(today));
@@ -315,9 +334,11 @@ static void test_appointment_status_db_flow(void)
 
     session_clear();
     g_session.role = ROLE_PATIENT;
-    snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", pid);
+    set_session_id(pid);
     ASSERT_RC(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "复诊"));
     aid = add_appointment_raw(pid, sid, today, SLOT_AM, APPT_WAITING);
+    /* 裸插的这条同样占一个号，才能验证"取消只回退自己那一份，另一条仍占号" */
+    ASSERT_RC(schedule_take_quota(sid));
 
     /* 取消：状态 2 且释放号源，终态不可再取消 */
     ASSERT_RC(appointment_cancel(aid));
@@ -341,9 +362,9 @@ static void test_appointment_status_db_flow(void)
         past_id = add_appointment_raw(pid, sid, "2000-01-01", SLOT_AM, APPT_WAITING);
 
         g_session.role = ROLE_DOCTOR;
-        snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", "UTD99");
+        set_session_id("UTD99");
         ASSERT_EQ(appointment_mark_noshow(past_id), ERR_PERM);
-        snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", "UTD01");
+        set_session_id("UTD01");
         ASSERT_RC(appointment_mark_noshow(past_id));
         ASSERT_RC(appointment_query_by_id(past_id, &ap));
         ASSERT_EQ(ap.status, APPT_NOSHOW);
@@ -359,6 +380,8 @@ static void test_todo_db_flow(void)
     int n = 0, sid, aid, i, has_appoint = 0, has_visit = 0, has_profile = 0;
 
     ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTTD%'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_visit_record WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_appointment WHERE doctor_id='UTD01'", NULL));
     ASSERT_RC(db_exec("DELETE FROM t_schedule WHERE doctor_id='UTD01'", NULL));
     register_ut_patient(&p, "UTTD000001", "待办患者UT", pid);
     fetch_scalar("SELECT CURDATE()", today, sizeof(today));
@@ -366,7 +389,7 @@ static void test_todo_db_flow(void)
 
     session_clear();
     g_session.role = ROLE_PATIENT;
-    snprintf(g_session.user_id, sizeof(g_session.user_id), "%s", pid);
+    set_session_id(pid);
     ASSERT_RC(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "待办"));
 
     /* 再造一条已就诊且有就诊记录的预约，覆盖第 3 条待办 */
