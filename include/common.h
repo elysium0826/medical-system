@@ -204,9 +204,12 @@ void today_str(char *out, int outlen);              /* "YYYY-MM-DD" */
 int str_empty(const char *s);                       /* NULL 或 "" 返回 1 */
 
 /* 分页与模糊查询的公共支持（FR-CMN-01，owner: D） */
-int page_normalize(int page);                            /* page 小于 1 时按 1 处理 */
-int page_offset(int page);                               /* (page-1)*PAGE_SIZE */
-int page_count(int total);                               /* 总页数，total 小于 1 时返回 1 */
+/* page 小于 1 时按 1 处理 */
+int page_normalize(int page);
+/* (page-1)*PAGE_SIZE */
+int page_offset(int page);
+/* 总页数，total 小于 1 时返回 1 */
+int page_count(int total);
 void like_escape(const char *in, char *out, int outlen); /* db_escape 后再转义 % 和 _ */
 
 /* 断言支持函数，实现在 common.c，供 tests/ 通过下面的宏使用 */
