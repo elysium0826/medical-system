@@ -301,7 +301,7 @@ static int patient_paged(const char *filter, int page, patient_t **out, int *out
 int patient_query_all(const char *keyword, int page, patient_t **out, int *out_n, int *out_total)
 {
     char sql[SQL_BUF];
-    char esc_kw[NAME_LEN * 2 + 1], like_kw[NAME_LEN * 8 + 1], filter[SQL_BUF];
+    char esc_kw[NAME_LEN * 2 + 1], like_kw[NAME_LEN * 8 + 1], filter[SQL_BUF / 2];
     db_result_t *rs = NULL;
     int rc, total = 0;
 
