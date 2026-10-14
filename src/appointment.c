@@ -50,9 +50,9 @@ static void appoint_read_row(const db_result_t *rs, int row, appoint_t *out)
 static int appoint_transition_ok(int from, int to)
 {
     static const int legal[][2] = {
-        { APPT_WAITING, APPT_VISITED },
-        { APPT_WAITING, APPT_CANCELED },
-        { APPT_WAITING, APPT_NOSHOW },
+        {APPT_WAITING, APPT_VISITED},
+        {APPT_WAITING, APPT_CANCELED},
+        {APPT_WAITING, APPT_NOSHOW},
     };
     size_t i;
 

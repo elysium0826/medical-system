@@ -196,7 +196,7 @@ static void test_patient_db_flow(void)
     ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTID%'", NULL));
     register_ut_patient(&p, "UTID000001", "归档患者UT", pid);
     ASSERT_TRUE(pid[0] == 'P');
-    ASSERT_EQ(strlen(pid), 9); /* P + 4 位年 + 4 位流水 */
+    ASSERT_EQ(strlen(pid), 9);                            /* P + 4 位年 + 4 位流水 */
     ASSERT_EQ(patient_register(&p, NULL), ERR_DUPLICATE); /* 身份证唯一 */
 
     ASSERT_RC(patient_query_by_id(pid, &got));
