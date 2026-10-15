@@ -303,24 +303,26 @@ int appointment_add(const char *patient_id, const char *doctor_id, int schedule_
     return ERR_TX;
 }
 
-/* 状态迁移的角色、归属与日期规则（P1 整改）：写入口自己判死，不依赖菜单隐藏或外层包装。
-   取消=患者本人或管理员；已就诊/爽约=接诊医生本人或管理员，且不能标在未来。 */
+/* 状态迁移规则按目标状态分别判（SRS 附录 D）：取消=管理员或患者本人；已就诊=接诊医生本人；
+   爽约=管理员或接诊医生本人，且预约日期必须早于今天（管理员同样受这条日期限制）。 */
 static int appoint_status_allowed(const appoint_t *cur, int new_status)
 {
     char today[11];
-    if (g_session.role == ROLE_ADMIN) {
-        return 0;
-    }
+    int admin = g_session.role == ROLE_ADMIN;
+    int owner = g_session.role == ROLE_DOCTOR && strcmp(cur->doctor_id, g_session.user_id) == 0;
+
     if (new_status == APPT_CANCELED) {
-        return (g_session.role == ROLE_PATIENT && strcmp(cur->patient_id, g_session.user_id) == 0)
+        return (admin ||
+                (g_session.role == ROLE_PATIENT && strcmp(cur->patient_id, g_session.user_id) == 0))
                    ? 0
                    : ERR_PERM;
     }
-    /* 已就诊与爽约都是就诊侧动作，只有接诊医生本人能做 */
-    if (g_session.role != ROLE_DOCTOR || strcmp(cur->doctor_id, g_session.user_id) != 0) {
+    /* 已就诊只认接诊医生本人；爽约额外放行管理员代标，但都不能落到别人接诊的号上 */
+    if (!owner && !(admin && new_status == APPT_NOSHOW)) {
         return ERR_PERM;
     }
     today_str(today, sizeof(today));
+    /* 爽约必须早于今天（管理员同样受限）；已就诊只能标今天或更早 */
     if (new_status == APPT_NOSHOW) {
         return date_diff_days(cur->appoint_date, today) < 0 ? 0 : ERR_BAD_STATE;
     }
@@ -369,10 +371,7 @@ int appointment_set_status(int appoint_id, int new_status, const char *reason)
     }
     /* 0→2 是本模块唯一的放号点，患者与管理员两条取消路径都经过这里，只放一次 */
     if (new_status == APPT_CANCELED && cur.schedule_id > 0) {
-        rc = schedule_release_quota(cur.schedule_id);
-        if (rc != 0) {
-            return rc;
-        }
+        return schedule_release_quota(cur.schedule_id);
     }
     return 0;
 }

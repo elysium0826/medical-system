@@ -56,12 +56,9 @@ static void test_param_guards(void)
 
 static void test_output_cleared(void)
 {
-    patient_t pt;
-    schedule_t st;
-    appoint_t at;
-    patient_t zero_p = {0};
-    schedule_t zero_s = {0};
-    appoint_t zero_a = {0};
+    patient_t pt, zero_p = {0};
+    schedule_t st, zero_s = {0};
+    appoint_t at, zero_a = {0};
     memset(&pt, 0x5a, sizeof(pt));
     memset(&st, 0x5a, sizeof(st));
     memset(&at, 0x5a, sizeof(at));
@@ -76,10 +73,8 @@ static void test_output_cleared(void)
 
 static void test_session_guards(void)
 {
-    patient_t pt = {0};
-    appoint_t one = {0};
-    patient_t *plist = NULL;
-    appoint_t *alist = NULL;
+    patient_t pt = {0}, *plist = NULL;
+    appoint_t one = {0}, *alist = NULL;
     schedule_t *slist = NULL;
     char today[11];
     int n = 0, total = 0;
@@ -205,9 +200,9 @@ static void test_patient_db_flow(void)
 {
     patient_t p, p2, got;
     patient_t *list = NULL;
-    char pid[PID_LEN], pid2[PID_LEN];
-    int n = 0, total = 0;
-
+    char pid[PID_LEN], pid2[PID_LEN], pid_tmp[PID_LEN];
+    int n = 0, total = 0, k;
+    const char *kw3[3] = {"UTPCT%ZZZ", "UTUND_QQQ", "UTBSL\\WWW"};
     wipe_ut("UTID%");
     register_ut_patient(&p, "UTID000001", "归档患者UT", pid);
     register_ut_patient(&p2, "UTID000002", "旁证患者UT", pid2);
@@ -231,30 +226,30 @@ static void test_patient_db_flow(void)
     set_session_id(pid);
     snprintf(got.phone, sizeof(got.phone), "%s", "13900000000");
     ASSERT_RC(patient_update_self(&got));
-    /* 列表：管理员按关键词命中，患者本人只看得到自己 */
+    /* 列表：管理员按关键词命中（含 P2-2 的字面量匹配），患者本人只看得到自己 */
     g_session.role = ROLE_ADMIN;
     ASSERT_RC(patient_query_all("归档患者UT", 1, &list, &n, &total));
     ASSERT_EQ(n, 1);
     ASSERT_EQ(total, 1);
     patient_list_free(list);
+    /* P2-2：% _ \ 按字面量匹配（FR-CMN-01）。% 与 _ 各配一条"无特殊字符"的对照记录，
+       转义失效时通配符会连对照一起命中；关键字带 UT 前缀，避开种子里已有的"%字面量"夹具。 */
+    register_ut_patient(&p2, "UTID000003", "UTPCT%ZZZ", pid_tmp);
+    register_ut_patient(&p2, "UTID000004", "UTPCTXXXZZZ", pid_tmp);
+    register_ut_patient(&p2, "UTID000005", "UTUND_QQQ", pid_tmp);
+    register_ut_patient(&p2, "UTID000006", "UTUNDYQQQ", pid_tmp);
+    register_ut_patient(&p2, "UTID000007", "UTBSL\\WWW", pid_tmp);
+    for (k = 0; k < 3; k++) {
+        ASSERT_RC(patient_query_all(kw3[k], 1, &list, &n, &total));
+        ASSERT_EQ(total, 1); /* 对照记录没被通配符带上 */
+        patient_list_free(list);
+    }
     g_session.role = ROLE_PATIENT;
     set_session_id(pid);
     ASSERT_RC(patient_query_all(NULL, 1, &list, &n, &total));
     ASSERT_EQ(n, 1);
     ASSERT_STR_EQ(list[0].patient_id, pid);
     patient_list_free(list);
-    /* P2-2：% _ 反斜杠按字面量匹配，不被当通配符（FR-CMN-01） */
-    register_ut_patient(&p2, "UTID000003", "百分%号UT", pid2);
-    g_session.role = ROLE_ADMIN;
-    ASSERT_RC(patient_query_all("%", 1, &list, &n, &total));
-    ASSERT_EQ(total, 1);
-    ASSERT_STR_EQ(list[0].patient_id, pid2);
-    patient_list_free(list);
-    ASSERT_RC(patient_query_all("_", 1, &list, &n, &total));
-    ASSERT_EQ(total, 0);
-    ASSERT_RC(patient_query_all("\\", 1, &list, &n, &total));
-    ASSERT_EQ(total, 0);
-    g_session.role = ROLE_PATIENT;
     /* 注销与删除属于管理员权限，患者自己不能注销/删除 */
     ASSERT_EQ(patient_set_status(pid, 0), ERR_PERM);
     ASSERT_EQ(patient_delete(pid), ERR_PERM);
@@ -352,12 +347,13 @@ static void test_appointment_status_db_flow(void)
     patient_t p;
     schedule_t sch;
     appoint_t ap;
-    char pid[PID_LEN], today[11], sql[SQL_BUF];
-    int aid, sid, past_id;
+    char pid[PID_LEN], today[11], tomorrow[11];
+    int aid, sid, past_id, past2, future_id;
 
     wipe_ut("UTNS%");
     register_ut_patient(&p, "UTNS000001", "爽约患者UT", pid);
     fetch_scalar("SELECT CURDATE()", today, sizeof(today));
+    fetch_scalar("SELECT DATE_ADD(CURDATE(), INTERVAL 1 DAY)", tomorrow, sizeof(tomorrow));
     sid = add_schedule(today, SLOT_AM, 2);
 
     session_clear();
@@ -365,26 +361,30 @@ static void test_appointment_status_db_flow(void)
     set_session_id(pid);
     ASSERT_RC(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "复诊"));
     aid = add_appointment_raw(pid, sid, today, SLOT_AM, APPT_WAITING);
+    future_id = add_appointment_raw(pid, sid, tomorrow, SLOT_PM, APPT_WAITING);
+    past_id = add_appointment_raw(pid, sid, "2000-01-01", SLOT_AM, APPT_WAITING);
+    past2 = add_appointment_raw(pid, sid, "2000-01-02", SLOT_AM, APPT_WAITING);
     /* 裸插的这条同样占一个号，才能验证"取消只回退自己那一份，另一条仍占号" */
     ASSERT_RC(schedule_take_quota(sid));
-
+    /* 管理员不是通行证：当天/未来不能标爽约，也不能替接诊医生标已就诊（SRS 附录 D） */
+    session_clear();
+    g_session.role = ROLE_ADMIN;
+    ASSERT_EQ(appointment_mark_noshow(aid), ERR_BAD_STATE);
+    ASSERT_EQ(appointment_mark_noshow(future_id), ERR_BAD_STATE);
+    ASSERT_EQ(appointment_set_status(aid, APPT_VISITED, "代诊"), ERR_PERM);
+    ASSERT_RC(appointment_mark_noshow(past2)); /* 过去的预约：管理员可代标 */
+    ASSERT_RC(appointment_query_by_id(past2, &ap));
+    ASSERT_EQ(ap.status, APPT_NOSHOW);
     /* 取消：状态 2 且释放号源，终态不可再取消 */
+    g_session.role = ROLE_PATIENT;
+    set_session_id(pid);
     ASSERT_RC(appointment_cancel(aid));
     ASSERT_RC(appointment_query_by_id(aid, &ap));
     ASSERT_EQ(ap.status, APPT_CANCELED);
     ASSERT_RC(schedule_query_by_id(sid, &sch));
     ASSERT_EQ(sch.quota_used, 1); /* 只回退取消那一条，另一条仍在占号 */
     ASSERT_EQ(appointment_cancel(aid), ERR_BAD_STATE);
-
-    /* 爽约：过期待就诊预约，非本人医生拒；本人医生成功置 3 */
-    snprintf(sql, sizeof(sql),
-             "INSERT INTO t_appointment(patient_id,doctor_id,schedule_id,appoint_date,"
-             "time_slot,symptom,status) VALUES('%s','UTD01',%d,"
-             "DATE_SUB(CURDATE(), INTERVAL 1 DAY),'%s','过期',%d)",
-             pid, sid, SLOT_AM, APPT_WAITING);
-    ASSERT_RC(db_exec(sql, NULL));
-    past_id = add_appointment_raw(pid, sid, "2000-01-01", SLOT_AM, APPT_WAITING);
-
+    /* 爽约：过期预约才可标；非本人医生拒，本人医生成功置 3 */
     g_session.role = ROLE_DOCTOR;
     set_session_id("UTD99");
     ASSERT_EQ(appointment_mark_noshow(past_id), ERR_PERM);
