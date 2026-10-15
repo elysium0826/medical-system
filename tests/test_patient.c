@@ -83,11 +83,14 @@ static void test_output_cleared(void)
 static void test_session_guards(void)
 {
     patient_t pt = {0};
+    appoint_t one = {0};
     patient_t *plist = NULL;
     appoint_t *alist = NULL;
     schedule_t *slist = NULL;
+    char today[11];
     int n = 0, total = 0;
 
+    today_str(today, sizeof(today));
     session_clear();
     /* 未登录：修改资料与各类列表查询均持 ERR_PERM */
     ASSERT_EQ(patient_update_self(&pt), ERR_PERM);
@@ -96,6 +99,15 @@ static void test_session_guards(void)
     ASSERT_EQ(appointment_query_by_patient("P20260001", 1, &alist, &n, &total), ERR_PERM);
     ASSERT_EQ(appointment_query_by_doctor("D001", NULL, 1, &alist, &n, &total), ERR_PERM);
     ASSERT_EQ(schedule_query_by_doctor(NULL, NULL, NULL, 1, &slist, &n), ERR_PERM);
+    /* 未登录：单条查询与所有写操作也必须拒，且不得碰数据库 */
+    ASSERT_EQ(patient_query_by_id("P20260001", &pt), ERR_PERM);
+    ASSERT_EQ(patient_set_status("P20260001", 0), ERR_PERM);
+    ASSERT_EQ(patient_delete("P20260001"), ERR_PERM);
+    ASSERT_EQ(appointment_query_by_id(1, &one), ERR_PERM);
+    ASSERT_EQ(appointment_set_status(1, APPT_CANCELED, "x"), ERR_PERM);
+    ASSERT_EQ(appointment_add("P20260001", "D001", 1, today, SLOT_AM, ""), ERR_PERM);
+    ASSERT_EQ(appointment_cancel(1), ERR_PERM);
+    ASSERT_EQ(appointment_reschedule(1, today, SLOT_AM, ROLE_NONE, NULL), ERR_PERM);
 }
 
 static void test_list_free_null(void)
@@ -127,7 +139,7 @@ static void fetch_scalar(const char *sql, char *out, int outlen)
     db_result_free(rs);
 }
 
-static int add_schedule(const char *date, const char *slot, int total)
+static int add_schedule_for(const char *did, const char *date, const char *slot, int total)
 {
     char sql[SQL_BUF];
     db_result_t *rs = NULL;
@@ -135,13 +147,18 @@ static int add_schedule(const char *date, const char *slot, int total)
 
     snprintf(sql, sizeof(sql),
              "INSERT INTO t_schedule(doctor_id,work_date,time_slot,quota_total,quota_used,status) "
-             "VALUES('UTD01','%s','%s',%d,0,1)",
-             date, slot, total);
+             "VALUES('%s','%s','%s',%d,0,1)",
+             did, date, slot, total);
     ASSERT_RC(db_exec(sql, NULL));
     ASSERT_RC(db_query("SELECT LAST_INSERT_ID()", &rs));
     id = atoi(db_get(rs, 0, 0));
     db_result_free(rs);
     return id;
+}
+
+static int add_schedule(const char *date, const char *slot, int total)
+{
+    return add_schedule_for("UTD01", date, slot, total);
 }
 
 static int add_appointment_raw(const char *pid, int sid, const char *date, const char *slot,
@@ -188,20 +205,28 @@ static void set_session_id(const char *id)
 
 static void test_patient_db_flow(void)
 {
-    patient_t p, got;
+    patient_t p, p2, got;
     patient_t *list = NULL;
-    char pid[PID_LEN];
+    char pid[PID_LEN], pid2[PID_LEN];
     int n = 0, total = 0;
 
     ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTID%'", NULL));
     register_ut_patient(&p, "UTID000001", "归档患者UT", pid);
+    register_ut_patient(&p2, "UTID000002", "旁证患者UT", pid2);
     ASSERT_TRUE(pid[0] == 'P');
     ASSERT_EQ(strlen(pid), 9);                            /* P + 4 位年 + 4 位流水 */
     ASSERT_EQ(patient_register(&p, NULL), ERR_DUPLICATE); /* 身份证唯一 */
 
+    /* 未登录不得读档案；患者只能读本人，读别人一律 ERR_PERM */
+    session_clear();
+    ASSERT_EQ(patient_query_by_id(pid, &got), ERR_PERM);
+    g_session.role = ROLE_PATIENT;
+    set_session_id(pid);
+    ASSERT_EQ(patient_query_by_id(pid2, &got), ERR_PERM);
     ASSERT_RC(patient_query_by_id(pid, &got));
     ASSERT_STR_EQ(got.name, "归档患者UT");
     ASSERT_EQ(got.status, 1);
+    ASSERT_STR_EQ(got.password, ""); /* 密码不出现在查询出参里 */
 
     /* 改资料：未登录与被冒用都拒，本人可改电话 */
     session_clear();
@@ -224,6 +249,11 @@ static void test_patient_db_flow(void)
     ASSERT_STR_EQ(list[0].patient_id, pid);
     patient_list_free(list);
 
+    /* 注销与删除属于管理员权限，患者自己不能注销/删除 */
+    ASSERT_EQ(patient_set_status(pid, 0), ERR_PERM);
+    ASSERT_EQ(patient_delete(pid), ERR_PERM);
+    session_clear();
+    g_session.role = ROLE_ADMIN;
     /* 注销后状态 0，删除后查不到 */
     ASSERT_RC(patient_set_status(pid, 0));
     ASSERT_RC(patient_query_by_id(pid, &got));
@@ -372,6 +402,108 @@ static void test_appointment_status_db_flow(void)
     session_clear();
 }
 
+static void test_appointment_auth_db_flow(void)
+{
+    patient_t p, p2;
+    appoint_t ap, *list = NULL;
+    char pid[PID_LEN], pid2[PID_LEN], today[11];
+    int n = 0, total = 0, aid, aid2, sid;
+
+    ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTAU%'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_visit_record WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_appointment WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_schedule WHERE doctor_id='UTD01'", NULL));
+    register_ut_patient(&p, "UTAU000001", "授权患者UT", pid);
+    register_ut_patient(&p2, "UTAU000002", "他人患者UT", pid2);
+    fetch_scalar("SELECT CURDATE()", today, sizeof(today));
+    sid = add_schedule(today, SLOT_AM, 4);
+
+    session_clear();
+    g_session.role = ROLE_PATIENT;
+    set_session_id(pid);
+    /* 患者不能替别人挂号，本人挂号放行 */
+    ASSERT_EQ(appointment_add(pid2, "UTD01", sid, today, SLOT_AM, "代挂"), ERR_PERM);
+    ASSERT_RC(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "本人"));
+    /* 再给另一个患者造一条预约，用来验证跨患者读取被拒 */
+    aid2 = add_appointment_raw(pid2, sid, today, SLOT_PM, APPT_WAITING);
+    ASSERT_RC(schedule_take_quota(sid));
+
+    ASSERT_RC(appointment_query_by_patient(pid, 1, &list, &n, &total));
+    ASSERT_EQ(n, 1);
+    aid = list[0].appoint_id;
+    appointment_list_free(list);
+
+    /* 本人可见；读他人预约、查他人列表、按医生查列表一律 ERR_PERM */
+    ASSERT_RC(appointment_query_by_id(aid, &ap));
+    ASSERT_EQ(appointment_query_by_id(aid2, &ap), ERR_PERM);
+    ASSERT_EQ(appointment_query_by_patient(pid2, 1, &list, &n, &total), ERR_PERM);
+    ASSERT_EQ(appointment_query_by_doctor("UTD01", NULL, 1, &list, &n, &total), ERR_PERM);
+    ASSERT_EQ(appointment_cancel(aid2), ERR_PERM); /* 取消别人的号也拒 */
+    session_clear();
+
+    /* 无关医生：读、改期、按医生查、取消全部拒 */
+    g_session.role = ROLE_DOCTOR;
+    set_session_id("UTD99");
+    ASSERT_EQ(appointment_query_by_id(aid, &ap), ERR_PERM);
+    ASSERT_EQ(appointment_reschedule(aid, today, SLOT_PM, ROLE_DOCTOR, NULL), ERR_PERM);
+    ASSERT_EQ(appointment_query_by_doctor("UTD01", NULL, 1, &list, &n, &total), ERR_PERM);
+    ASSERT_EQ(appointment_cancel(aid), ERR_PERM);
+    /* 本人医生查自己的接诊列表放行 */
+    set_session_id("UTD01");
+    ASSERT_RC(appointment_query_by_doctor("UTD01", NULL, 1, &list, &n, &total));
+    ASSERT_EQ(total, 2);
+    appointment_list_free(list);
+    session_clear();
+}
+
+static void test_delete_guard_db_flow(void)
+{
+    patient_t p, got;
+    schedule_t sch;
+    appoint_t *list = NULL;
+    char pid[PID_LEN], today[11];
+    int n = 0, total = 0, aid, sid;
+
+    ASSERT_RC(db_exec("DELETE FROM t_patient WHERE id_card LIKE 'UTDL%'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_visit_record WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_appointment WHERE doctor_id='UTD01'", NULL));
+    ASSERT_RC(db_exec("DELETE FROM t_schedule WHERE doctor_id='UTD01'", NULL));
+    register_ut_patient(&p, "UTDL000001", "删除守卫UT", pid);
+    fetch_scalar("SELECT CURDATE()", today, sizeof(today));
+    sid = add_schedule(today, SLOT_AM, 2);
+
+    /* 停职医生不再放出号源：挂号按"无此医生"拒 */
+    ASSERT_RC(db_exec("UPDATE t_doctor SET status=0 WHERE doctor_id='UTD01'", NULL));
+    session_clear();
+    g_session.role = ROLE_PATIENT;
+    set_session_id(pid);
+    ASSERT_EQ(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "停诊"), ERR_NOT_FOUND);
+    ASSERT_RC(db_exec("UPDATE t_doctor SET status=1 WHERE doctor_id='UTD01'", NULL));
+
+    /* 正常挂号后有业务引用，硬删除必须被拦下 */
+    ASSERT_RC(appointment_add(pid, "UTD01", sid, today, SLOT_AM, "复诊"));
+    ASSERT_RC(appointment_query_by_patient(pid, 1, &list, &n, &total));
+    aid = list[0].appoint_id;
+    appointment_list_free(list);
+    session_clear();
+    g_session.role = ROLE_ADMIN;
+    ASSERT_EQ(patient_delete(pid), ERR_BAD_STATE);
+
+    /* 软注销保留历史：档案可查、预约仍在、号源计数不变 */
+    ASSERT_RC(patient_set_status(pid, 0));
+    ASSERT_RC(patient_query_by_id(pid, &got));
+    ASSERT_EQ(got.status, 0);
+    ASSERT_RC(schedule_query_by_id(sid, &sch));
+    ASSERT_EQ(sch.quota_used, 1);
+
+    /* 取消预约号源立即回退；预约记录仍在，删除依旧被引用拦下 */
+    ASSERT_RC(appointment_cancel(aid));
+    ASSERT_RC(schedule_query_by_id(sid, &sch));
+    ASSERT_EQ(sch.quota_used, 0);
+    ASSERT_EQ(patient_delete(pid), ERR_BAD_STATE);
+    session_clear();
+}
+
 static void test_todo_db_flow(void)
 {
     patient_t p;
@@ -452,6 +584,8 @@ int main(void)
         test_schedule_db_flow();
         test_appointment_db_flow();
         test_appointment_status_db_flow();
+        test_appointment_auth_db_flow();
+        test_delete_guard_db_flow();
         test_todo_db_flow();
         cleanup_fixtures();
         db_close();

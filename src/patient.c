@@ -11,27 +11,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 查询按下面顺序取列，解析也按同一序号读，改列顺序必须同步改 patient_read_row */
+/* 查询按下面顺序取列，解析也按同一序号读，改列顺序必须同步改 patient_read_row。
+   刻意不查 password：密码只供登录校验用，不能经业务查询下发给调用方。 */
 #define PATIENT_FIELDS                                                                             \
-    "patient_id, password, name, gender, birth_date, id_card, phone, address, "                    \
+    "patient_id, name, gender, birth_date, id_card, phone, address, "                              \
     "status, create_time, update_time, contact_name, contact_phone"
 
 static void patient_read_row(const db_result_t *rs, int row, patient_t *out)
 {
     memset(out, 0, sizeof(*out));
     snprintf(out->patient_id, sizeof(out->patient_id), "%s", db_get(rs, row, 0));
-    snprintf(out->password, sizeof(out->password), "%s", db_get(rs, row, 1));
-    snprintf(out->name, sizeof(out->name), "%s", db_get(rs, row, 2));
-    snprintf(out->gender, sizeof(out->gender), "%s", db_get(rs, row, 3));
-    snprintf(out->birth_date, sizeof(out->birth_date), "%s", db_get(rs, row, 4));
-    snprintf(out->id_card, sizeof(out->id_card), "%s", db_get(rs, row, 5));
-    snprintf(out->phone, sizeof(out->phone), "%s", db_get(rs, row, 6));
-    snprintf(out->address, sizeof(out->address), "%s", db_get(rs, row, 7));
-    out->status = atoi(db_get(rs, row, 8));
-    snprintf(out->create_time, sizeof(out->create_time), "%s", db_get(rs, row, 9));
-    snprintf(out->update_time, sizeof(out->update_time), "%s", db_get(rs, row, 10));
-    snprintf(out->contact_name, sizeof(out->contact_name), "%s", db_get(rs, row, 11));
-    snprintf(out->contact_phone, sizeof(out->contact_phone), "%s", db_get(rs, row, 12));
+    snprintf(out->name, sizeof(out->name), "%s", db_get(rs, row, 1));
+    snprintf(out->gender, sizeof(out->gender), "%s", db_get(rs, row, 2));
+    snprintf(out->birth_date, sizeof(out->birth_date), "%s", db_get(rs, row, 3));
+    snprintf(out->id_card, sizeof(out->id_card), "%s", db_get(rs, row, 4));
+    snprintf(out->phone, sizeof(out->phone), "%s", db_get(rs, row, 5));
+    snprintf(out->address, sizeof(out->address), "%s", db_get(rs, row, 6));
+    out->status = atoi(db_get(rs, row, 7));
+    snprintf(out->create_time, sizeof(out->create_time), "%s", db_get(rs, row, 8));
+    snprintf(out->update_time, sizeof(out->update_time), "%s", db_get(rs, row, 9));
+    snprintf(out->contact_name, sizeof(out->contact_name), "%s", db_get(rs, row, 10));
+    snprintf(out->contact_phone, sizeof(out->contact_phone), "%s", db_get(rs, row, 11));
 }
 
 /* 生成当年编号 P + 4 位年 + 4 位流水，取当年最大流水 + 1，无记录从 0001 起。
@@ -139,10 +139,14 @@ cleanup:
     }
     if (rc != 0) {
         db_tx_rollback();
-    } else if (db_tx_commit() != 0) {
-        rc = ERR_TX;
+        return rc;
     }
-    return rc;
+    /* 提交失败时事务状态仍在，必须补一次回滚，否则后续操作全报 ERR_TX */
+    if (db_tx_commit() == 0) {
+        return 0;
+    }
+    db_tx_rollback();
+    return ERR_TX;
 }
 
 int patient_update_self(const patient_t *p)
@@ -189,6 +193,10 @@ int patient_set_status(const char *patient_id, int new_status)
     if (str_empty(patient_id) || (new_status != 0 && new_status != 1)) {
         return ERR_PARAM;
     }
+    /* 注销与恢复只有管理员能做，必须在函数内校验，不能只把菜单藏起来 */
+    if (!session_is_login() || g_session.role != ROLE_ADMIN) {
+        return ERR_PERM;
+    }
     db_escape(patient_id, esc_pid, sizeof(esc_pid));
     snprintf(sql, sizeof(sql),
              "UPDATE t_patient SET status = %d, update_time = NOW() WHERE patient_id = '%s'",
@@ -203,11 +211,16 @@ int patient_set_status(const char *patient_id, int new_status)
 int patient_delete(const char *patient_id)
 {
     char sql[SQL_BUF], esc_pid[PID_LEN * 2 + 1];
+    db_result_t *rs = NULL;
     unsigned long long affected = 0;
     int rc;
 
     if (str_empty(patient_id)) {
         return ERR_PARAM;
+    }
+    /* 硬删除只开放给管理员，且必须已登录 */
+    if (!session_is_login() || g_session.role != ROLE_ADMIN) {
+        return ERR_PERM;
     }
     rc = db_tx_begin();
     if (rc != 0) {
@@ -216,12 +229,25 @@ int patient_delete(const char *patient_id)
     rc = ERR_DB_EXEC;
 
     db_escape(patient_id, esc_pid, sizeof(esc_pid));
-    /* 表间没有物理外键，先清该患者的预约再删档案，否则会留下指向空患者的孤儿预约 */
-    snprintf(sql, sizeof(sql), "DELETE FROM t_appointment WHERE patient_id = '%s'", esc_pid);
-    rc = db_exec(sql, NULL);
+    /* 有预约、就诊、处方或病历引用时禁止硬删：删了会让这些历史记录指向不存在的患者，
+       预约占用的号源也不会回退。要保留历史请改用 patient_set_status 软注销。 */
+    snprintf(sql, sizeof(sql),
+             "SELECT (SELECT COUNT(*) FROM t_appointment WHERE patient_id = '%s')"
+             " + (SELECT COUNT(*) FROM t_visit_record WHERE patient_id = '%s')"
+             " + (SELECT COUNT(*) FROM t_prescription WHERE patient_id = '%s')"
+             " + (SELECT COUNT(*) FROM t_medical_record WHERE patient_id = '%s')",
+             esc_pid, esc_pid, esc_pid, esc_pid);
+    rc = db_query(sql, &rs);
     if (rc != 0) {
         goto cleanup;
     }
+    if (atoi(db_get(rs, 0, 0)) > 0) {
+        rc = ERR_BAD_STATE;
+        goto cleanup;
+    }
+    db_result_free(rs);
+    rs = NULL;
+
     snprintf(sql, sizeof(sql), "DELETE FROM t_patient WHERE patient_id = '%s'", esc_pid);
     rc = db_exec(sql, &affected);
     if (rc != 0) {
@@ -230,12 +256,19 @@ int patient_delete(const char *patient_id)
     rc = affected == 1 ? 0 : ERR_NOT_FOUND;
 
 cleanup:
+    if (rs != NULL) {
+        db_result_free(rs);
+    }
     if (rc != 0) {
         db_tx_rollback();
-    } else if (db_tx_commit() != 0) {
-        rc = ERR_TX;
+        return rc;
     }
-    return rc;
+    /* 提交失败时事务状态仍在，必须补一次回滚，否则后续操作全报 ERR_TX */
+    if (db_tx_commit() == 0) {
+        return 0;
+    }
+    db_tx_rollback();
+    return ERR_TX;
 }
 
 int patient_query_by_id(const char *patient_id, patient_t *out)
@@ -250,6 +283,13 @@ int patient_query_by_id(const char *patient_id, patient_t *out)
     memset(out, 0, sizeof(*out));
     if (str_empty(patient_id)) {
         return ERR_PARAM;
+    }
+    /* 未登录一律拒；患者只能查本人，管理员与医生可按需查阅（管理、接诊需要） */
+    if (!session_is_login()) {
+        return ERR_PERM;
+    }
+    if (g_session.role == ROLE_PATIENT && strcmp(patient_id, g_session.user_id) != 0) {
+        return ERR_PERM;
     }
     db_escape(patient_id, esc_pid, sizeof(esc_pid));
     snprintf(sql, sizeof(sql), "SELECT %s FROM t_patient WHERE patient_id = '%s'", PATIENT_FIELDS,

@@ -20,9 +20,10 @@
     " FROM t_schedule s "                                                                          \
     "LEFT JOIN t_doctor d ON d.doctor_id = s.doctor_id"
 
-/* 只看还能约的时段：在诊、未约满、且不早于今天 */
+/* 只看还能约的时段：在诊、未约满、不早于今天，且医生本人是在职状态（离职医生不再放出号源） */
 #define SCHEDULE_AVAILABLE                                                                         \
-    " AND s.status = 1 AND s.quota_used < s.quota_total AND s.work_date >= CURDATE()"
+    " AND s.status = 1 AND s.quota_used < s.quota_total AND s.work_date >= CURDATE() "             \
+    "AND d.status = 1"
 
 static void schedule_read_row(const db_result_t *rs, int row, schedule_t *out)
 {
@@ -53,14 +54,66 @@ int schedule_add_week(const char *doctor_id, const char *monday, int quota_am, i
     return ERR_PARAM;
 }
 
+/* 拼查询 SQL：医生、日期区间、两端都空时默认今天起一周，患者角色强制只看有余号的。 */
+static void schedule_build_sql(const char *doctor_id, const char *date_from, const char *date_to,
+                               int only_available, char *sql, size_t sql_size)
+{
+    char esc_did[DID_LEN * 2 + 1];
+    char doc_clause[96] = "", from_clause[96] = "", to_clause[96] = "";
+
+    if (!str_empty(doctor_id)) {
+        db_escape(doctor_id, esc_did, sizeof(esc_did));
+        snprintf(doc_clause, sizeof(doc_clause), " AND s.doctor_id = '%s'", esc_did);
+    }
+    if (date_from != NULL) {
+        snprintf(from_clause, sizeof(from_clause), " AND s.work_date >= '%s'", date_from);
+    }
+    if (date_to != NULL) {
+        snprintf(to_clause, sizeof(to_clause), " AND s.work_date <= '%s'", date_to);
+    }
+    /* 两端都不填时默认今天起 SCHEDULE_DAYS 天（含今天）：只卡下界会把 30 天后的排班
+       也当成"一周内"返回，所以要同时补上界 */
+    if (date_from == NULL && date_to == NULL) {
+        snprintf(from_clause, sizeof(from_clause), " AND s.work_date >= CURDATE()");
+        snprintf(to_clause, sizeof(to_clause),
+                 " AND s.work_date <= DATE_ADD(CURDATE(), INTERVAL %d DAY)", SCHEDULE_DAYS - 1);
+    }
+    if (g_session.role == ROLE_PATIENT) {
+        only_available = 1;
+    }
+    snprintf(sql, sql_size,
+             "SELECT " SCHEDULE_FIELDS SCHEDULE_FROM " WHERE 1 = 1%s%s%s%s "
+             "ORDER BY s.work_date ASC, FIELD(s.time_slot, '%s', '%s'), s.schedule_id",
+             doc_clause, from_clause, to_clause, only_available ? SCHEDULE_AVAILABLE : "", SLOT_AM,
+             SLOT_PM);
+}
+
+/* 把查询结果搬到堆上，交给调用方 free；出错时出参保持调用方置好的空值。 */
+static int schedule_fetch_list(const db_result_t *rs, schedule_t **out, int *out_n)
+{
+    schedule_t *list = NULL;
+    int i, n = rs->rows;
+
+    if (n > 0) {
+        list = malloc((size_t)n * sizeof(*list));
+        if (list == NULL) {
+            return ERR_NOMEM;
+        }
+        for (i = 0; i < n; i++) {
+            schedule_read_row(rs, i, &list[i]);
+        }
+    }
+    *out = list;
+    *out_n = n;
+    return 0;
+}
+
 int schedule_query_by_doctor(const char *doctor_id, const char *date_from, const char *date_to,
                              int only_available, schedule_t **out, int *out_n)
 {
     char sql[SQL_BUF];
-    char esc_did[DID_LEN * 2 + 1], doc_clause[64], from_clause[64], to_clause[64];
     db_result_t *rs = NULL;
-    schedule_t *list = NULL;
-    int rc, i, n;
+    int rc;
 
     if (out == NULL || out_n == NULL) {
         return ERR_PARAM;
@@ -74,49 +127,14 @@ int schedule_query_by_doctor(const char *doctor_id, const char *date_from, const
         (date_to != NULL && !date_valid(date_to))) {
         return ERR_PARAM;
     }
-    doc_clause[0] = from_clause[0] = to_clause[0] = '\0';
-    if (!str_empty(doctor_id)) {
-        db_escape(doctor_id, esc_did, sizeof(esc_did));
-        snprintf(doc_clause, sizeof(doc_clause), " AND s.doctor_id = '%s'", esc_did);
-    }
-    if (date_from != NULL) {
-        snprintf(from_clause, sizeof(from_clause), " AND s.work_date >= '%s'", date_from);
-    }
-    if (date_to != NULL) {
-        snprintf(to_clause, sizeof(to_clause), " AND s.work_date <= '%s'", date_to);
-    }
-    /* 两端都不填时默认今天起一周，正好对上排班按周生成的节奏 */
-    if (date_from == NULL && date_to == NULL) {
-        snprintf(from_clause, sizeof(from_clause), " AND s.work_date >= CURDATE()");
-    }
-    /* 患者角色强制只看有余号的排班，避免选到已约满或已停诊的时段 */
-    if (g_session.role == ROLE_PATIENT) {
-        only_available = 1;
-    }
-    snprintf(sql, sizeof(sql),
-             "SELECT " SCHEDULE_FIELDS SCHEDULE_FROM " WHERE 1 = 1%s%s%s%s "
-             "ORDER BY s.work_date ASC, FIELD(s.time_slot, '%s', '%s'), s.schedule_id",
-             doc_clause, from_clause, to_clause, only_available ? SCHEDULE_AVAILABLE : "", SLOT_AM,
-             SLOT_PM);
+    schedule_build_sql(doctor_id, date_from, date_to, only_available, sql, sizeof(sql));
     rc = db_query(sql, &rs);
     if (rc != 0) {
         return rc;
     }
-    n = rs->rows;
-    if (n > 0) {
-        list = malloc((size_t)n * sizeof(*list));
-        if (list == NULL) {
-            db_result_free(rs);
-            return ERR_NOMEM;
-        }
-        for (i = 0; i < n; i++) {
-            schedule_read_row(rs, i, &list[i]);
-        }
-    }
+    rc = schedule_fetch_list(rs, out, out_n);
     db_result_free(rs);
-    *out = list;
-    *out_n = n;
-    return 0;
+    return rc;
 }
 
 int schedule_query_by_id(int schedule_id, schedule_t *out)

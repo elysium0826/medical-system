@@ -127,7 +127,12 @@ static void patient_book(const schedule_t *s)
     char symptom[256] = {0};
     int rc;
 
-    read_line("请输入症状（可空，回车跳过）：", symptom, sizeof(symptom));
+    /* 读取失败（EOF 或输入异常）不能当成"空症状"继续挂号，直接取消这次操作 */
+    if (read_line("请输入症状（可空，回车跳过）：", symptom, sizeof(symptom)) != 0) {
+        printf("输入已中断，已取消挂号。\n");
+        pause_wait();
+        return;
+    }
     rc = appointment_add(g_session.user_id, s->doctor_id, s->schedule_id, s->work_date,
                          s->time_slot, symptom);
     printf("%s\n", rc == 0 ? "挂号成功。" : err_str(rc));

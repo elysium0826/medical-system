@@ -23,7 +23,6 @@
     "LEFT JOIN t_patient p ON p.patient_id = a.patient_id "                                        \
     "LEFT JOIN t_doctor d ON d.doctor_id = a.doctor_id"
 
-/* 改期次数上限，超过这个数就不许再改了 */
 #define APPOINT_CHANGE_MAX 3
 
 static void appoint_read_row(const db_result_t *rs, int row, appoint_t *out)
@@ -46,26 +45,7 @@ static void appoint_read_row(const db_result_t *rs, int row, appoint_t *out)
     out->change_count = atoi(db_get(rs, row, 14));
 }
 
-/* 合法迁移表（SRS 附录 D），只有 0 待就诊可迁出，1/2/3 是终态。 */
-static int appoint_transition_ok(int from, int to)
-{
-    static const int legal[][2] = {
-        {APPT_WAITING, APPT_VISITED},
-        {APPT_WAITING, APPT_CANCELED},
-        {APPT_WAITING, APPT_NOSHOW},
-    };
-    size_t i;
-
-    for (i = 0; i < sizeof(legal) / sizeof(legal[0]); i++) {
-        if (legal[i][0] == from && legal[i][1] == to) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-/* 按主键取一条预约（带患者姓名、医生姓名、科室），不存在返回 ERR_NOT_FOUND。
-   预约的状态、医生、患者、号源都从这里读，写操作也复用它，省一次手写查询。 */
+/* 按主键取一条预约（带患者姓名、医生姓名、科室），不存在返回 ERR_NOT_FOUND。 */
 static int appoint_load(int appoint_id, appoint_t *out)
 {
     char sql[SQL_BUF];
@@ -87,8 +67,7 @@ static int appoint_load(int appoint_id, appoint_t *out)
     return 0;
 }
 
-/* 分页列表公共实现：filter 是已转义且以 " WHERE ..." 开头的条件串（可为空串）。
-   先 COUNT 取总数，再按固定排序取一页，三个列表查询共用。 */
+/* 分页列表公共实现：filter 是已转义且以 " WHERE ..." 开头的条件串（可为空串）。 */
 static int appoint_paged(const char *filter, int page, appoint_t **out, int *out_n, int *out_total)
 {
     char sql[SQL_BUF];
@@ -105,7 +84,6 @@ static int appoint_paged(const char *filter, int page, appoint_t **out, int *out
         *out_total = atoi(db_get(rs, 0, 0));
     }
     db_result_free(rs);
-    rs = NULL;
 
     snprintf(sql, sizeof(sql),
              "SELECT " APPOINT_FIELDS APPOINT_FROM "%s "
@@ -132,57 +110,24 @@ static int appoint_paged(const char *filter, int page, appoint_t **out, int *out
     return 0;
 }
 
-/* 列表查询的公共收尾：出参先置空，未登录直接拒。调用方已完成 out/out_n 非空校验。 */
-static int appoint_list_ready(appoint_t **out, int *out_n, int *out_total)
+/* 列表查询公共前置：出参先清零，未登录直接拒，各入口据此再按角色拼条件。 */
+static int appoint_list_prep(appoint_t **out, int *out_n, int *out_total)
 {
+    if (out == NULL || out_n == NULL) {
+        return ERR_PARAM;
+    }
     *out = NULL;
     *out_n = 0;
     if (out_total != NULL) {
         *out_total = 0;
     }
-    return session_is_login() ? 0 : ERR_PERM;
+    if (!session_is_login()) {
+        return ERR_PERM;
+    }
+    return 0;
 }
 
-/* 校验目标排班存在且在诊并取出它的 schedule_id；再确认改期后不与本人同医生
-   的其他待就诊预约冲突。esc_* 必须是已转义串。 */
-static int appoint_target_check(const char *esc_doctor, const char *esc_patient, const char *date,
-                                const char *slot, int appoint_id, int *out_schedule_id)
-{
-    char sql[SQL_BUF];
-    db_result_t *rs = NULL;
-    int rc;
-
-    snprintf(sql, sizeof(sql),
-             "SELECT schedule_id FROM t_schedule WHERE doctor_id = '%s' AND work_date = '%s' "
-             "AND time_slot = '%s' AND status = 1",
-             esc_doctor, date, slot);
-    rc = db_query(sql, &rs);
-    if (rc != 0) {
-        return rc;
-    }
-    if (rs->rows == 0) {
-        db_result_free(rs);
-        return ERR_NOT_FOUND;
-    }
-    *out_schedule_id = atoi(db_get(rs, 0, 0));
-    db_result_free(rs);
-    rs = NULL;
-
-    snprintf(sql, sizeof(sql),
-             "SELECT appoint_id FROM t_appointment WHERE patient_id = '%s' AND doctor_id = '%s' "
-             "AND appoint_date = '%s' AND status = 0 AND appoint_id <> %d",
-             esc_patient, esc_doctor, date, appoint_id);
-    rc = db_query(sql, &rs);
-    if (rc != 0) {
-        return rc;
-    }
-    rc = rs->rows > 0 ? ERR_DUPLICATE : 0;
-    db_result_free(rs);
-    return rc;
-}
-
-/* 挂号前的三项校验：患者存在且在册、同患者同日同医生无重复待就诊、排班存在且在诊。
-   都在发起方事务内执行，参数为已转义串，任意一项不满足就返回对应错误码。 */
+/* 挂号前的四项校验：患者存在且在册、医生在职、无重复待就诊、排班在诊。 */
 static int appoint_add_precheck(const char *esc_pid, const char *esc_did, int schedule_id,
                                 const char *date, const char *slot)
 {
@@ -195,12 +140,23 @@ static int appoint_add_precheck(const char *esc_pid, const char *esc_did, int sc
     if (rc != 0) {
         return rc;
     }
-    if (rs->rows == 0 || atoi(db_get(rs, 0, 0)) != 1) {
-        db_result_free(rs);
-        return ERR_NOT_FOUND;
-    }
+    rc = (rs->rows == 0 || atoi(db_get(rs, 0, 0)) != 1) ? ERR_NOT_FOUND : 0;
     db_result_free(rs);
-    rs = NULL;
+    if (rc != 0) {
+        return rc;
+    }
+
+    /* 停职/离职医生不能再被挂上号，按"无此医生"处理 */
+    snprintf(sql, sizeof(sql), "SELECT status FROM t_doctor WHERE doctor_id = '%s'", esc_did);
+    rc = db_query(sql, &rs);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = (rs->rows == 0 || atoi(db_get(rs, 0, 0)) != 1) ? ERR_NOT_FOUND : 0;
+    db_result_free(rs);
+    if (rc != 0) {
+        return rc;
+    }
 
     snprintf(sql, sizeof(sql),
              "SELECT appoint_id FROM t_appointment WHERE patient_id = '%s' AND doctor_id = '%s' "
@@ -210,12 +166,11 @@ static int appoint_add_precheck(const char *esc_pid, const char *esc_did, int sc
     if (rc != 0) {
         return rc;
     }
-    if (rs->rows > 0) {
-        db_result_free(rs);
-        return ERR_DUPLICATE;
-    }
+    rc = rs->rows > 0 ? ERR_DUPLICATE : 0;
     db_result_free(rs);
-    rs = NULL;
+    if (rc != 0) {
+        return rc;
+    }
 
     snprintf(sql, sizeof(sql),
              "SELECT schedule_id FROM t_schedule WHERE schedule_id = %d AND doctor_id = '%s' "
@@ -236,7 +191,7 @@ int appointment_add(const char *patient_id, const char *doctor_id, int schedule_
     char sql[SQL_BUF];
     char esc_pid[PID_LEN * 2 + 1], esc_did[DID_LEN * 2 + 1], esc_sym[512];
     char today[11];
-    int rc, ahead;
+    int rc;
 
     if (str_empty(patient_id) || str_empty(doctor_id) || schedule_id <= 0 ||
         !date_valid(appoint_date) || str_empty(time_slot) || symptom == NULL) {
@@ -247,11 +202,16 @@ int appointment_add(const char *patient_id, const char *doctor_id, int schedule_
     }
     /* 只能约今天起 APPOINT_AHEAD_DAYS 天内，越界直接拒，不查库 */
     today_str(today, sizeof(today));
-    ahead = date_diff_days(appoint_date, today);
-    if (ahead < 0 || ahead > APPOINT_AHEAD_DAYS) {
+    if (date_diff_days(appoint_date, today) < 0 ||
+        date_diff_days(appoint_date, today) > APPOINT_AHEAD_DAYS) {
         return ERR_PARAM;
     }
-
+    /* 挂号权限：患者只能给自己挂，管理员可代挂；未登录与其他角色一律拒，且在开事务前拦截 */
+    if (!session_is_login() ||
+        (g_session.role == ROLE_PATIENT && strcmp(patient_id, g_session.user_id) != 0) ||
+        (g_session.role != ROLE_PATIENT && g_session.role != ROLE_ADMIN)) {
+        return ERR_PERM;
+    }
     db_escape(patient_id, esc_pid, sizeof(esc_pid));
     db_escape(doctor_id, esc_did, sizeof(esc_did));
     db_escape(symptom, esc_sym, sizeof(esc_sym));
@@ -280,10 +240,12 @@ int appointment_add(const char *patient_id, const char *doctor_id, int schedule_
         db_tx_rollback();
         return rc;
     }
-    if (db_tx_commit() != 0) {
-        return ERR_TX;
+    /* 提交失败时事务状态仍在，必须补一次回滚，否则后续操作全报 ERR_TX */
+    if (db_tx_commit() == 0) {
+        return 0;
     }
-    return 0;
+    db_tx_rollback();
+    return ERR_TX;
 }
 
 int appointment_set_status(int appoint_id, int new_status, const char *reason)
@@ -297,14 +259,18 @@ int appointment_set_status(int appoint_id, int new_status, const char *reason)
     if (appoint_id <= 0 || new_status < APPT_WAITING || new_status > APPT_NOSHOW) {
         return ERR_PARAM;
     }
+    /* 状态迁移是写操作，未登录一律拒；具体角色与归属由各公开入口负责校验 */
+    if (!session_is_login()) {
+        return ERR_PERM;
+    }
     rc = appoint_load(appoint_id, &cur);
     if (rc != 0) {
         return rc;
     }
-    if (!appoint_transition_ok(cur.status, new_status)) {
+    /* 合法迁移表（SRS 附录 D）：只有待就诊可迁出，1/2/3 都是终态 */
+    if (cur.status != APPT_WAITING || new_status == APPT_WAITING) {
         return ERR_BAD_STATE;
     }
-
     /* UPDATE 带上旧状态，两步之间若被别处改掉则不覆盖，影响 0 行按并发兜底处理 */
     snprintf(sql, sizeof(sql),
              "UPDATE t_appointment SET status = %d, update_time = NOW() "
@@ -335,61 +301,67 @@ int appointment_cancel(int appoint_id)
     if (appoint_id <= 0) {
         return ERR_PARAM;
     }
-    rc = db_tx_begin();
+    /* 取消只开放给患者本人与管理员，未登录或医生等其他角色一律拒 */
+    if (!session_is_login() || (g_session.role != ROLE_PATIENT && g_session.role != ROLE_ADMIN)) {
+        return ERR_PERM;
+    }
+    rc = appoint_load(appoint_id, &cur);
     if (rc != 0) {
         return rc;
     }
-    /* 患者只能取消本人预约，管理员不限；权限以会话为准 */
-    if (g_session.role == ROLE_PATIENT) {
-        rc = appoint_load(appoint_id, &cur);
-        if (rc != 0) {
-            db_tx_rollback();
-            return rc;
-        }
-        if (strcmp(cur.patient_id, g_session.user_id) != 0) {
-            db_tx_rollback();
-            return ERR_PERM;
-        }
+    if (g_session.role == ROLE_PATIENT && strcmp(cur.patient_id, g_session.user_id) != 0) {
+        return ERR_PERM;
+    }
+    rc = db_tx_begin();
+    if (rc != 0) {
+        return rc;
     }
     rc = appointment_set_status(appoint_id, APPT_CANCELED, "取消挂号");
     if (rc != 0) {
         db_tx_rollback();
         return rc;
     }
-    if (db_tx_commit() != 0) {
-        return ERR_TX;
+    if (db_tx_commit() == 0) {
+        return 0;
     }
-    return 0;
+    db_tx_rollback();
+    return ERR_TX;
 }
 
-/* 改期前置校验：读原预约，必须待就诊且没超改期次数，患者只能改本人的号。 */
-static int appoint_reschedule_prepare(int appoint_id, appoint_t *out_cur)
-{
-    int rc = appoint_load(appoint_id, out_cur);
-
-    if (rc != 0) {
-        return rc;
-    }
-    if (out_cur->status != APPT_WAITING || out_cur->change_count >= APPOINT_CHANGE_MAX) {
-        return ERR_BAD_STATE;
-    }
-    if (g_session.role == ROLE_PATIENT && strcmp(out_cur->patient_id, g_session.user_id) != 0) {
-        return ERR_PERM;
-    }
-    return 0;
-}
-
-/* 改期落库：校验目标排班，换号时先放旧号再占新号，最后改日期时段并累加改期次数。
-   任一步失败直接返回错误，由调用方回滚整个事务。 */
+/* 改期落库：校验目标排班在诊且本人当天无重复待就诊，换号时先放旧号再占新号。 */
 static int appoint_apply_reschedule(int appoint_id, const appoint_t *cur, const char *esc_doctor,
                                     const char *esc_patient, const char *new_date,
                                     const char *new_slot)
 {
     char sql[SQL_BUF];
+    db_result_t *rs = NULL;
     int rc, new_schedule;
 
-    rc = appoint_target_check(esc_doctor, esc_patient, new_date, new_slot, appoint_id,
-                              &new_schedule);
+    snprintf(sql, sizeof(sql),
+             "SELECT schedule_id FROM t_schedule WHERE doctor_id = '%s' AND work_date = '%s' "
+             "AND time_slot = '%s' AND status = 1",
+             esc_doctor, new_date, new_slot);
+    rc = db_query(sql, &rs);
+    if (rc != 0) {
+        return rc;
+    }
+    if (rs->rows == 0) {
+        db_result_free(rs);
+        return ERR_NOT_FOUND;
+    }
+    new_schedule = atoi(db_get(rs, 0, 0));
+    db_result_free(rs);
+
+    snprintf(sql, sizeof(sql),
+             "SELECT appoint_id FROM t_appointment WHERE patient_id = '%s' AND doctor_id = '%s' "
+             "AND appoint_date = '%s' AND status = 0 AND appoint_id <> %d",
+             esc_patient, esc_doctor, new_date, appoint_id);
+    rc = db_query(sql, &rs);
+    if (rc != 0) {
+        return rc;
+    }
+    rc = rs->rows > 0 ? ERR_DUPLICATE : 0;
+    db_result_free(rs);
     if (rc != 0) {
         return rc;
     }
@@ -435,18 +407,28 @@ int appointment_reschedule(int appoint_id, const char *new_date, const char *new
         date_diff_days(new_date, today) > APPOINT_AHEAD_DAYS) {
         return ERR_PARAM;
     }
-    /* 外部传入的角色只做一致性校验，权限判断一律以会话为准 */
-    if (operator_role != g_session.role) {
+    /* operator_role 只做一致性校验，权限以会话为准：改期只给患者本人与管理员 */
+    if (operator_role != g_session.role || !session_is_login() ||
+        (g_session.role != ROLE_PATIENT && g_session.role != ROLE_ADMIN)) {
         return ERR_PERM;
     }
     rc = db_tx_begin();
     if (rc != 0) {
         return rc;
     }
-    rc = appoint_reschedule_prepare(appoint_id, &cur);
+    rc = appoint_load(appoint_id, &cur);
     if (rc != 0) {
         db_tx_rollback();
         return rc;
+    }
+    /* 必须待就诊且没超改期次数；患者只能改本人的号 */
+    if (cur.status != APPT_WAITING || cur.change_count >= APPOINT_CHANGE_MAX) {
+        db_tx_rollback();
+        return ERR_BAD_STATE;
+    }
+    if (g_session.role == ROLE_PATIENT && strcmp(cur.patient_id, g_session.user_id) != 0) {
+        db_tx_rollback();
+        return ERR_PERM;
     }
     db_escape(cur.doctor_id, esc_did, sizeof(esc_did));
     db_escape(cur.patient_id, esc_pid, sizeof(esc_pid));
@@ -458,10 +440,11 @@ int appointment_reschedule(int appoint_id, const char *new_date, const char *new
     if (out_new_appoint != NULL && appoint_load(appoint_id, out_new_appoint) != 0) {
         out_new_appoint = NULL;
     }
-    if (db_tx_commit() != 0) {
-        return ERR_TX;
+    if (db_tx_commit() == 0) {
+        return 0;
     }
-    return 0;
+    db_tx_rollback();
+    return ERR_TX;
 }
 
 int appointment_mark_noshow(int appoint_id)
@@ -472,6 +455,9 @@ int appointment_mark_noshow(int appoint_id)
 
     if (appoint_id <= 0) {
         return ERR_PARAM;
+    }
+    if (!session_is_login()) {
+        return ERR_PERM;
     }
     rc = db_tx_begin();
     if (rc != 0) {
@@ -488,6 +474,7 @@ int appointment_mark_noshow(int appoint_id)
         db_tx_rollback();
         return ERR_BAD_STATE;
     }
+    /* 医生只能标记本人接诊的爽约，管理员不限 */
     if (g_session.role == ROLE_DOCTOR) {
         if (strcmp(cur.doctor_id, g_session.user_id) != 0) {
             db_tx_rollback();
@@ -502,14 +489,18 @@ int appointment_mark_noshow(int appoint_id)
         db_tx_rollback();
         return rc;
     }
-    if (db_tx_commit() != 0) {
-        return ERR_TX;
+    if (db_tx_commit() == 0) {
+        return 0;
     }
-    return 0;
+    db_tx_rollback();
+    return ERR_TX;
 }
 
 int appointment_query_by_id(int appoint_id, appoint_t *out)
 {
+    appoint_t cur;
+    int rc;
+
     if (out == NULL) {
         return ERR_PARAM;
     }
@@ -517,33 +508,41 @@ int appointment_query_by_id(int appoint_id, appoint_t *out)
     if (appoint_id <= 0) {
         return ERR_PARAM;
     }
-    return appoint_load(appoint_id, out);
+    /* 未登录一律拒；患者只能看本人预约，医生只能看自己接诊的，管理员不限 */
+    if (!session_is_login()) {
+        return ERR_PERM;
+    }
+    rc = appoint_load(appoint_id, &cur);
+    if (rc != 0) {
+        return rc;
+    }
+    if (g_session.role == ROLE_PATIENT && strcmp(cur.patient_id, g_session.user_id) != 0) {
+        return ERR_PERM;
+    }
+    if (g_session.role == ROLE_DOCTOR && strcmp(cur.doctor_id, g_session.user_id) != 0) {
+        return ERR_PERM;
+    }
+    *out = cur;
+    return 0;
 }
 
+/* 分页模糊查询（FR-CMN-01）：keyword 匹配患者姓名；患者走此入口也只查本人。 */
 int appointment_query_all(const char *keyword, int page, appoint_t **out, int *out_n,
                           int *out_total)
 {
-    char esc_kw[NAME_LEN * 2 + 1], like_kw[NAME_LEN * 8 + 1], filter[SQL_BUF];
-    int rc;
+    char filter[SQL_BUF], esc[NAME_LEN * 2 + 1];
+    int rc = appoint_list_prep(out, out_n, out_total);
 
-    if (out == NULL || out_n == NULL) {
-        return ERR_PARAM;
-    }
-    rc = appoint_list_ready(out, out_n, out_total);
     if (rc != 0) {
         return rc;
     }
     filter[0] = '\0';
-    /* 患者只能看本人预约；管理员与医生看全部，关键词匹配患者姓名 */
     if (g_session.role == ROLE_PATIENT) {
-        char esc_pid[PID_LEN * 2 + 1];
-
-        db_escape(g_session.user_id, esc_pid, sizeof(esc_pid));
-        snprintf(filter, sizeof(filter), " WHERE a.patient_id = '%s'", esc_pid);
+        db_escape(g_session.user_id, esc, sizeof(esc));
+        snprintf(filter, sizeof(filter), " WHERE a.patient_id = '%s'", esc);
     } else if (!str_empty(keyword)) {
-        db_escape(keyword, esc_kw, sizeof(esc_kw));
-        like_escape(esc_kw, like_kw, sizeof(like_kw));
-        snprintf(filter, sizeof(filter), " WHERE p.name LIKE '%%%s%%'", like_kw);
+        db_escape(keyword, esc, sizeof(esc));
+        snprintf(filter, sizeof(filter), " WHERE p.name LIKE '%%%s%%'", esc);
     }
     return appoint_paged(filter, page, out, out_n, out_total);
 }
@@ -551,44 +550,46 @@ int appointment_query_all(const char *keyword, int page, appoint_t **out, int *o
 int appointment_query_by_patient(const char *patient_id, int page, appoint_t **out, int *out_n,
                                  int *out_total)
 {
-    char esc_pid[PID_LEN * 2 + 1], filter[256];
-    int rc;
+    char filter[SQL_BUF], esc[NAME_LEN * 2 + 1];
+    int rc = appoint_list_prep(out, out_n, out_total);
 
-    if (out == NULL || out_n == NULL || str_empty(patient_id)) {
-        return ERR_PARAM;
-    }
-    rc = appoint_list_ready(out, out_n, out_total);
     if (rc != 0) {
         return rc;
+    }
+    /* 未登录已在 prep 拒掉；患者只能查本人编号，管理员与医生按传入编号查 */
+    if (str_empty(patient_id)) {
+        return ERR_PARAM;
     }
     if (g_session.role == ROLE_PATIENT && strcmp(patient_id, g_session.user_id) != 0) {
         return ERR_PERM;
     }
-    db_escape(patient_id, esc_pid, sizeof(esc_pid));
-    snprintf(filter, sizeof(filter), " WHERE a.patient_id = '%s'", esc_pid);
+    db_escape(patient_id, esc, sizeof(esc));
+    snprintf(filter, sizeof(filter), " WHERE a.patient_id = '%s'", esc);
     return appoint_paged(filter, page, out, out_n, out_total);
 }
 
+/* date 为 NULL 时查全部，否则只查该日；医生只能查本人接诊列表，管理员不限。 */
 int appointment_query_by_doctor(const char *doctor_id, const char *date, int page, appoint_t **out,
                                 int *out_n, int *out_total)
 {
-    char esc_did[DID_LEN * 2 + 1], filter[256];
-    int rc;
+    char filter[SQL_BUF], esc[DID_LEN * 2 + 1];
+    int rc = appoint_list_prep(out, out_n, out_total);
 
-    if (out == NULL || out_n == NULL || str_empty(doctor_id) ||
-        (date != NULL && !date_valid(date))) {
-        return ERR_PARAM;
-    }
-    rc = appoint_list_ready(out, out_n, out_total);
     if (rc != 0) {
         return rc;
     }
-    db_escape(doctor_id, esc_did, sizeof(esc_did));
-    if (date == NULL) {
-        snprintf(filter, sizeof(filter), " WHERE a.doctor_id = '%s'", esc_did);
-    } else {
-        snprintf(filter, sizeof(filter), " WHERE a.doctor_id = '%s' AND a.appoint_date = '%s'",
-                 esc_did, date);
+    if (str_empty(doctor_id) || (date != NULL && !date_valid(date))) {
+        return ERR_PARAM;
+    }
+    if ((g_session.role == ROLE_DOCTOR && strcmp(doctor_id, g_session.user_id) != 0) ||
+        (g_session.role != ROLE_DOCTOR && g_session.role != ROLE_ADMIN)) {
+        return ERR_PERM;
+    }
+    db_escape(doctor_id, esc, sizeof(esc));
+    snprintf(filter, sizeof(filter), " WHERE a.doctor_id = '%s'", esc);
+    if (date != NULL) {
+        snprintf(filter + strlen(filter), sizeof(filter) - strlen(filter),
+                 " AND a.appoint_date = '%s'", date);
     }
     return appoint_paged(filter, page, out, out_n, out_total);
 }
