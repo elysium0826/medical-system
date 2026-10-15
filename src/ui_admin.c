@@ -1,6 +1,6 @@
 /*
- * ui_admin.c  管理员端菜单与待办入口（C）
- * 作者：C   创建：2026-10-14
+ * admin_1.c  管理员端菜单与待办入口
+ * 作者：shangshuo  创建：2026-10-14
  */
 #include "ui.h"
 
@@ -27,11 +27,40 @@ static void admin_medicine_menu(void)
     medicine_t *medicines = NULL;
     int count = 0;
     int total = 0;
+    int i;
     int rc = medicine_query_all(NULL, 1, &medicines, &count, &total);
 
-    printf("药品库存未实现：%s\n", err_str(rc));
-    if (rc == 0)
-        medicine_list_free(medicines);
+    if (rc != 0) {
+        printf("药品查询失败：%s\n", err_str(rc));
+        pause_wait();
+        return;
+    }
+
+    print_title("药品库存");
+    if (count == 0) {
+        printf("暂无药品记录\n");
+    } else {
+        print_table_header("编号 | 药品 | 规格 | 单价 | 库存 | 状态");
+        for (i = 0; i < count; i++) {
+            const char *status;
+            const char *stock_note = "";
+
+            if (medicines[i].status == MED_ON_SALE)
+                status = "在售";
+            else
+                status = "停用";
+            if (medicines[i].stock < LOW_STOCK)
+                stock_note = " [库存偏低]";
+
+            print_table_row("%s | %s | %s | %.2f | %d | %s%s", medicines[i].med_id,
+                            medicines[i].med_name, medicines[i].spec, medicines[i].price,
+                            medicines[i].stock, status, stock_note);
+        }
+        print_table_end();
+    }
+    print_page_info(1, total);
+    medicine_list_free(medicines);
+    pause_wait();
 }
 
 static void admin_export_menu(void)
