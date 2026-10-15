@@ -99,7 +99,7 @@ make asan            # 重新构建，执行测试和只读开发包demo
 
 `make test`必须报告测试层次：公共层/mock骨架自检、真实MySQL8集成TC、尚未实现TC。桩仅供先行链接，不得把桩返回0/无菜单异常算FR验收；目标是SRS第9章52TC，不宣称已覆盖。ASan/UBSan目标须跑demo和test并开启泄漏检查；未实际跑过只记未验证。
 
-[CI](.github/workflows/ci.yml) 在ubuntu-latest使用临时medical_test和合成数据：make→lint→format-check→db-init/db-migrate→test→check-data→重新db-init/db-migrate/db-seed→asan。asan必须在seed之后；格式只检查不改文件。工作流在 `main`、`develop`、`master` 分支的推送和拉取请求上触发；分支保护需由仓库维护者在GitHub设置。
+[CI](.github/workflows/ci.yml) 在ubuntu-latest使用临时medical_test和合成数据：make→lint→format-check→db-init/db-migrate→test→check-data→重新db-init/db-migrate/db-seed→asan。asan必须在seed之后；格式只检查不改文件。当前协作是功能分支通过PR合回 `main`，不新增分支保护、固定审批人数或required status checks门禁。现有工作流还兼容 `develop`、`master` 旧分支名，无需创建这些分支。
 
 ## 本次已验证的骨架范围（2026-10-14）
 
@@ -109,13 +109,13 @@ make asan            # 重新构建，执行测试和只读开发包demo
 - 公共层测试包含16KiB长字符串/空值/空结果、参数绑定、事务提交与回滚/禁止嵌套、公共工具、会话超时，以及管理员登录失败计数、锁定和成功清零。
 - 三端实际登录、待办未实现提示、业务桩菜单跳转及退出已通过冒烟测试。
 - `make asan`实际执行测试与只读demo，开启AddressSanitizer/UndefinedBehaviorSanitizer及泄漏检查，最终通过；三端菜单另在同一sanitizer构建下通过。
-- 上述不代表A/B/C业务实现、不代表52条SRS TC全通过；GitHub Actions的执行结果以仓库实际运行记录为准，分支保护尚待维护者配置。格式工具版本不同若产生纯格式差异，交D统一版本，不擅改业务逻辑。
+- 上述不代表A/B/C业务实现、不代表52条SRS TC全通过；GitHub Actions的执行结果以仓库实际运行记录为准，CI绿色不替代对应FR/TC验收。格式工具版本不同若产生纯格式差异，交D统一版本，不擅改业务逻辑。
 
 ## 协作与实现范围
 
 A：M01/M03/M09、患者注册数据入口、患者待办；B：M04/M05/M07、模板与医生待办；C：M02/M06/M10、导出/管理员UI与待办；D：M08、common/db、main、todo框架、构建/scripts/CI/集成测试。每个任务对应一个FR，修改公共接口前须由维护者确认。
 
-一个表一个owner；跨模块写用唯一入口，调用者管事务。接诊/爽约不放号；取消只放一次；开方扣库存并记流水整体回滚；作废只零变化留痕，不返库存。关键口径矛盾先交D裁定。
+一个表一个owner；跨模块写用唯一入口，调用者管事务。接诊/爽约不放号；取消由 `appointment_set_status` 在状态置2后释放一次号源，外层不重复释放；开方扣库存并记流水整体回滚；作废只零变化留痕，不返库存。改期仅本人患者或管理员可操作；爽约仅管理员或归属医生可标记过去日期的待就诊预约。上述预约写入口在函数内校验权限，具体契约见SRS第3.3、4.4、6.1、7.2节与附录D。关键口径矛盾先交D裁定。
 
 核心演示目标：注册→查排班→挂号占号→接诊→开方扣库存→写病历→患者查询，再演示改期/爽约/模板/预警/待办。当前`make demo`/`bash scripts/demo.sh`只做只读数据检查并列出待实现演示清单，明确不是上述业务链路的端到端演示。
 

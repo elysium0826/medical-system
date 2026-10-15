@@ -16,7 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 仅验证未实现桩报 ERR_PARAM、出参清空及释放接口；不代表业务验收用例通过。 */
+/* 检查未实现接口、列表查询权限和释放接口，不代表整模块验收。 */
 
 static void test_doctor_add(void)
 {
@@ -140,7 +140,7 @@ static void test_medicine_query_all(void)
     int out_n = 7;
     int out_total = 7;
 
-    assert(medicine_query_all(NULL, 1, &entries, &out_n, &out_total) == ERR_PARAM);
+    assert(medicine_query_all(NULL, 1, &entries, &out_n, &out_total) == ERR_PERM);
     assert(entries == NULL);
     assert(out_n == 0);
     assert(out_total == 0);
