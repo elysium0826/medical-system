@@ -82,12 +82,9 @@ int medicine_query_by_id(const char *med_id, medicine_t *out)
 
 static int medicine_where(const char *keyword, char *where, int size)
 {
-    char literal[NAME_LEN * 2];
     char escaped[NAME_LEN * 4 + 1];
     char pattern[NAME_LEN * 6 + 1];
     const char *visible = g_session.role == ROLE_ADMIN ? "1=1" : "status = 1";
-    int i;
-    int pos = 0;
     int written;
 
     if (str_empty(keyword)) {
@@ -96,15 +93,10 @@ static int medicine_where(const char *keyword, char *where, int size)
         if (strlen(keyword) >= NAME_LEN)
             return ERR_PARAM;
 
-        /* 转义搜索关键字，让 %、_ 和反斜杠按普通字符匹配 */
-        for (i = 0; keyword[i] != '\0'; i++) {
-            if (keyword[i] == '\\')
-                literal[pos++] = '\\';
-            literal[pos++] = keyword[i];
-        }
-        literal[pos] = '\0';
-
-        db_escape(literal, escaped, sizeof(escaped));
+        /* 与 patient.c / appointment.c 统一转义链路：db_escape 防注入，like_escape 再补一层
+           LIKE 转义（% _ 各自转义，成对的 \ 翻倍）。不要在这里手工加倍反斜杠，
+           否则会和 like_escape 叠加成两层转义，含反斜杠的药名就搜不到了。 */
+        db_escape(keyword, escaped, sizeof(escaped));
         like_escape(escaped, pattern, sizeof(pattern));
         if (pattern[0] == '\0')
             return ERR_PARAM;
