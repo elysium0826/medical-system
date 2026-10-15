@@ -193,8 +193,8 @@ v1.0 说明书 1.1.3 列出的排除项**全部保留排除**，v1.1 不做：
 | 排班查询 | ✔ 全部 | ✔ 本人 | ✔ 可挂号的医生 | 患者端只显示未来 7 天且 `status=1` 且有余号的记录 |
 | 号源数调整 | ✔ | — | — | 只能调未来日期，已占用数不得超过新号源总数 |
 | 停诊 / 复诊 | ✔ | — | — | `t_schedule.status` 置 0 / 1；停诊时段若已有预约，**必须**提示条数并拒绝停诊 |
-| 预约改期 | — | — | ✔ 本人 | 只能改 `status=0` 的预约，只能改到未来 7 天内 |
-| 爽约标记 | ✔ | ✔ 本人当日 | — | 只对 `status=0` 且日期早于今天的预约生效 |
+| 预约改期 | ✔ 全部 | — | ✔ 本人 | 只能改 `status=0` 的预约，只能改到今天起 7 天内（含今天） |
+| 爽约标记 | ✔ 全部 | ✔ 本人预约 | — | 只对 `status=0` 且日期早于今天的预约生效 |
 | 库存流水查询 | ✔ | ✔ 与本人处方相关 | — | 医生只能看 `change_type=3` 且 `ref_id` 属于本人处方的记录 |
 | 低库存预警列表 | ✔ | — | — | 与 v1.0 的"低于 LOW_STOCK 在列表标注"并存 |
 | 库存盘点 | ✔ | — | — | v1.0 已有，v1.1 改为生成流水 |
@@ -309,7 +309,7 @@ const char *err_str(int code);   /* 返回中文提示语，未知码返回"未�
 | `t_patient` | A | `patient_register`、`patient_update_self`、`patient_set_status` | C 调 `patient_set_status` 注销 |
 | `t_doctor` | C | `doctor_add`、`doctor_update`、`doctor_set_status` | 仅 C |
 | `t_admin` | D | `user_change_password` | 仅 D |
-| `t_appointment` | A | `appointment_add`、`appointment_set_status`、`appointment_reschedule` | B 调 `appointment_set_status` 接诊/爽约；C 调它取消 |
+| `t_appointment` | A | `appointment_add`、`appointment_set_status`、`appointment_reschedule` | B 接诊在事务内调 `appointment_set_status`；爽约 UI 调 A 的 `appointment_mark_noshow`；C 取消 UI 调 A 的 `appointment_cancel` |
 | `t_visit_record` | B | `visit_add` | 仅 B |
 | `t_prescription` / `t_presc_detail` | B | `prescription_add`、`prescription_void` | 仅 B |
 | `t_medicine` | C | `medicine_add`、`medicine_update_price`、`medicine_change_stock`、`medicine_set_status` | B 开方时调 `medicine_change_stock` 扣减 |
@@ -483,8 +483,8 @@ FR-M03-06  预约改期与爽约标记
 规则（改期）：
   1. 预约必须存在；不存在返回 ERR_NOT_FOUND
   2. 只有 status=0 可改期；否则返回 ERR_BAD_STATE
-  3. 患者角色调用时，appoint_id 必须属于 g_session 中的当前患者；否则返回 ERR_PERM。
-     管理员可对任意预约改期
+  3. 仅当前登录的患者或管理员可改期；患者只能改本人预约，管理员可改任意预约。
+     医生、未登录者或患者操作他人预约时返回 ERR_PERM；operator_role 必须与当前会话角色一致
   4. new_date 必须在今天起 APPOINT_AHEAD_DAYS 天内（含今天）；否则返回 ERR_PARAM
   5. 目标 (doctor_id, new_date, new_slot) 的排班必须存在且 status=1；否则返回 ERR_NOT_FOUND
   6. 改期后不得与其他 status=0 的预约冲突（同患者同日同医生唯一）；冲突返回 ERR_DUPLICATE
@@ -497,7 +497,8 @@ FR-M03-06  预约改期与爽约标记
 输入（爽约）：appoint_id, operator（管理员或该预约的接诊医生）
 规则（爽约）：
   1. 预约必须存在，且 status=0，且 appoint_date 早于今天；否则返回 ERR_BAD_STATE
-  2. 医生角色调用时，appoint_id 的 doctor_id 必须等于当前医生；否则返回 ERR_PERM
+  2. 仅当前登录的管理员或该预约的归属医生可操作；医生须满足 doctor_id 等于当前医生，
+     其他身份或医生操作他人预约时返回 ERR_PERM
   3. 调 appointment_set_status(appoint_id, 3, "爽约")
   4. 号源不释放（quota_used 不减），这是与取消的区别
 
@@ -517,8 +518,9 @@ FR-M03-07  挂号时占用号源（对基线 appointment_add 的修改）
   3. 事务内先调 schedule_take_quota(schedule_id)，返回 ERR_NO_QUOTA 时整个挂号失败，
      不得写入 t_appointment
   4. 插入 t_appointment 时写入 schedule_id
-  5. 取消（appointment_cancel）在事务内调 schedule_release_quota(appoint->schedule_id)；
-     schedule_id 为 NULL 的历史数据跳过放号，不报错
+  5. 取消（appointment_cancel）开启事务并调用 appointment_set_status(..., 2, ...)；
+     由 appointment_set_status 在状态成功置 2 后调用 schedule_release_quota，外层不得重复放号。
+     schedule_id 为 NULL（C 结构体中为 0）的历史数据跳过放号，不报错
   6. 接诊与爽约不释放号源
   7. 基线的"同患者同日同医生不可重复挂号"规则保留，检查顺序在占号之前
 验收：TC-M09-03, TC-M09-04, TC-M03-05
@@ -973,9 +975,10 @@ void db_escape(const char *in, char *out, size_t outlen);
 
 ```c
 /* include/appointment.h    owner: A */
-/* 预约状态迁移的唯一入口。合法迁移见附录 B。
-   内部禁止事务控制。非法迁移返回 ERR_BAD_STATE。
-   reason 可为 NULL，写入日志字段（本项目仅用于 UI 回显，不落库）。 */
+/* 预约状态迁移的唯一入口。合法迁移及角色、归属、日期条件见附录 D，函数内校验。
+   内部禁止事务控制，由调用方包裹事务。非法迁移返回 ERR_BAD_STATE。
+   仅 0 -> 2 在状态更新成功后释放一次号源，调用方不得重复释放。
+   reason 可为 NULL，仅用于 UI 回显，不落库。 */
 int appointment_set_status(int appoint_id, int new_status, const char *reason);
 
 /* include/schedule.h    owner: A */
@@ -1008,7 +1011,7 @@ int patient_set_status(const char *patient_id, int new_status);
 | B `prescription_void` | `medicine_change_stock(mid, 0, 6, presc_id, op)` | 状态置 0 之后 | B 的事务内 |
 | C 患者注销 UI | `patient_set_status(pid, 0)` | — | C 的事务内 |
 | A `appointment_add` | `schedule_take_quota(sid)` | 插入 t_appointment 之前 | A 的事务内 |
-| A `appointment_cancel` | `schedule_release_quota(sid)` | 状态置 2 之后 | A 的事务内 |
+| 患者 / 管理员取消 UI | A 的 `appointment_cancel(id)` | 由其调用 `appointment_set_status(id, 2, "取消挂号")`，setter 更新成功后仅放号一次，外层不重复放号 | A 的事务内 |
 | A `appointment_reschedule` | `release` 后 `take` | 更新字段之前 | A 的事务内 |
 | C `medicine_check_stock` | `medicine_change_stock(mid, diff, 4或5, batch, op)` | — | C 的事务内 |
 
@@ -1130,7 +1133,7 @@ medical-system/
 ├── CHANGELOG.md                C
 ├── .gitignore                  D
 ├── .clang-format               D
-├── CODEOWNERS                  D
+├── CODEOWNERS                  D（可选的负责人提醒，不作合并门禁）
 ├── .github/
 │   ├── workflows/ci.yml        D
 │   ├── PULL_REQUEST_TEMPLATE.md  D
@@ -1357,18 +1360,17 @@ make help         列出全部目标
 
 主远端 GitHub，镜像远端 Gitee（`git remote add gitee ...`，只在 GitHub 不可达时推送，防校园网波动）。
 
-| 分支 | 用途 | 保护 |
-|------|------|------|
-| `master` | 可交付状态，只接受来自 `develop` 的 PR | 禁 force push、禁直接 push、需 2 approve |
-| `develop` | 集成分支 | 禁 force push、禁直接 push、需 1 approve + CI 通过 |
-| `feature/<role>-<module>-<简述>` | 功能开发 | 无 |
-| `hotfix/<简述>` | 从 master 拉出修紧急问题，同时合回 master 与 develop | 无 |
+| 分支 | 用途 |
+|------|------|
+| `main` | 当前集成主线；可交付版本在实际验收后打 tag |
+| `feature/<role>-<module>-<简述>` | 从 `main` 开发，通过 PR 合回 `main` |
+| `hotfix/<简述>` | 从 `main` 修复问题，通过 PR 合回 `main` |
 
 角色代号：`patient`（A）、`doctor`（B）、`admin`（C）、`core`（D）。示例：`feature/patient-m09-schedule`、`feature/doctor-m05-template`、`feature/admin-m10-stocklog`、`feature/core-ci`。
 
-分支保护规则在 W1 由 D 配置：`develop` 与 `master` 开启 Require a pull request before merging、Require status checks to pass（check 名为 `ci`）、Require branches to be up to date before merging、Do not allow force pushes、Include administrators。
+课程项目沿用功能分支 → PR → `main` 的流程，不另建集成或发布分支，不新增分支保护、固定审批人数或 required status checks 门禁。CI 提供验证记录，功能是否完成仍按对应 FR / TC 判断。
 
-### 11.2 CODEOWNERS
+### 11.2 文件负责人（CODEOWNERS 参考）
 
 ```
 /include/          @D
@@ -1394,7 +1396,7 @@ make help         列出全部目标
 /CHANGELOG.md      @C
 ```
 
-CODEOWNERS 使对应 owner 自动成为必需审阅者。（实际使用时把 @A～@D 替换为四人的 GitHub 用户名。）
+以上是文件归属参考，不要求新增 CODEOWNERS 或启用强制 owner review。若使用该文件提醒负责人，将 @A～@D 替换为实际 GitHub 用户名；接口变更仍按第 7.2 节由 owner 与 D 确认。
 
 ### 11.3 PR 规则
 
@@ -1402,10 +1404,10 @@ CODEOWNERS 使对应 owner 自动成为必需审阅者。（实际使用时把 @
 2. diff 不超过 400 行（不含自动生成的 SQL 数据）。超出必须拆分
 3. 标题用 conventional commits：`feat(M09): 按周生成排班号源`、`fix(M05): 明细插入失败时库存未回滚`、`refactor(C): 盘点差异改走 medicine_change_stock`、`test(M10): 补盘亏流水用例`、`chore(ci): 加 mysql 服务容器`
 4. 描述按四段填写（模板已生成）：改了什么 / 怎么测的（列出通过的 TC 编号）/ 影响谁的接口（改了头文件或唯一写入口时必须点名）/ AI 辅助说明（哪些部分由 agent 生成、自己做了哪些判断与修改）
-5. 至少 1 个 approve；改动 `include/*.h`、`src/db.c`、`src/common.c`、`src/main.c`、`Makefile`、`scripts/**`、`.github/**` 时需 2 个 approve，且其中必须包含 D
+5. 按第 11.4 节安排交叉评审；公共接口或核心文件改动与 D 确认，不要求固定 approve 数量或额外 GitHub 审批门禁
 6. 禁止自审自合
-7. `develop` 与 `master` 禁止 force push；个人分支 rebase 后用 `git push --force-with-lease`
-8. CI 未绿不得合并；本地**必须**先跑 `make && make lint && make format-check && make test`
+7. 不改写 `main` 历史；个人分支 rebase 后用 `git push --force-with-lease`，不要用裸 `--force`
+8. 提交前运行 `make && make lint && make format-check && make test` 并记录结果；结合 CI 检查失败项，不把桩测试或 CI 绿色当作业务验收，不新增 required status checks 配置
 
 ### 11.4 评审分工
 
@@ -1431,15 +1433,15 @@ CODEOWNERS 使对应 owner 自动成为必需审阅者。（实际使用时把 @
 
 ### 11.6 CI
 
-`.github/workflows/ci.yml`：
+`.github/workflows/ci.yml` 的主线触发示意如下；仓库现有工作流还兼容旧分支名，无需因此创建那些分支或调整工作流：
 
 ```yaml
 name: ci
 on:
   pull_request:
-    branches: [ develop, master ]
+    branches: [ main ]
   push:
-    branches: [ develop, master ]
+    branches: [ main ]
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -1477,7 +1479,7 @@ jobs:
 - 小步提交，一次一个改动。禁止把 agent 一次生成的几百行代码打成单个 commit
 - 提交信息带模块号与动词，说清做了什么。禁止 `update`、`修改`、`完善代码`
 - 每次提交前本地跑 `make && make lint`
-- 合并 `develop` 到自己的分支用 `git pull --rebase origin develop`，避免无意义的 merge commit
+- 同步 `main` 到自己的分支用 `git pull --rebase origin main`，避免无意义的 merge commit
 
 ---
 
@@ -1553,12 +1555,12 @@ agent 产出后，提交人**必须**逐行读过再提 PR，并回答三个问�
 
 | 里程碑 | 时间 | 内容 | 判定标准 |
 |--------|------|------|---------|
-| **W1 地基** | 第 1 周 | GitHub 仓库与分支保护、CODEOWNERS、Issue/PR 模板、CI、Makefile、`db.c` 六类封装、`common.c` 与 `ui.h` 全套公共函数、`errcode.h`、13 张表的 DDL 与 `init_db.sql`、全部头文件定稿、三端菜单空壳、`.ai/` 目录 | `make` 通过且 CI 绿；`make db-init` 建库成功；程序能登录并进入三个空菜单；`make lint` 通过 |
+| **W1 地基** | 第 1 周 | GitHub 仓库与功能分支 → `main` 流程、文件负责人、Issue/PR 模板、CI、Makefile、`db.c` 六类封装、`common.c` 与 `ui.h` 全套公共函数、`errcode.h`、13 张表的 DDL 与 `init_db.sql`、全部头文件定稿、三端菜单空壳、`.ai/` 目录 | `make` 通过且 CI 绿；`make db-init` 建库成功；程序能登录并进入三个空菜单；`make lint` 通过 |
 | **W2 核心链路** | 第 2 周 | v1.0 的 35 个功能点全部实现（M01～M08 基线行为）；P0 用例通过 | `bash scripts/demo.sh` 走完 v1.0 说明书 4.7 的六步主流程无报错；P0 用例全绿；打 tag `v1.0` |
 | **W3 扩展** | 第 3 周上半 | 12 个新功能点（M09 4 点、M10 3 点、M11 3 点、M03-06、M05-05）；CH-01～CH-08 | 对应 Issue 全部关闭；TC-M09-*/TC-M10-*/TC-M11-*/TC-M03-*/TC-M05-* 全绿；`make check-data` 通过 |
 | **W4 收尾** | 第 3 周下半 | 联调、README、CHANGELOG、四份设计说明、答辩演示脚本排练、`make asan` 清零 | CI 全绿；`make asan` 无报告；tag `v1.1`；四份设计说明入库 |
 
-W1 的四件事按此顺序做（前后有依赖）：① D 建仓库、配保护分支与 CI，推空 Makefile；② D 提交 `errcode.h` + `db.h` + `common.h` 骨架（只有声明），**当天**合并，让三人能开始写实现；③ 四人各写自己表的 DDL 并由 D 汇总 `init_db.sql`；④ 三人开始写各自模块，D 补 `common.c` 与 `ui.h` 的实现。第 ② 步是关键路径，D 若在第一天没交出头文件，其余三人当天无法开工——这一条是 v1.0 说明书暴露的瓶颈，v1.1 用"头文件先行 + db.c 收窄为通用封装"解决。
+W1 的四件事按此顺序做（前后有依赖）：① D 建仓库、配置 CI，推空 Makefile；② D 提交 `errcode.h` + `db.h` + `common.h` 骨架（只有声明），**当天**合并，让三人能开始写实现；③ 四人各写自己表的 DDL 并由 D 汇总 `init_db.sql`；④ 三人开始写各自模块，D 补 `common.c` 与 `ui.h` 的实现。第 ② 步是关键路径，D 若在第一天没交出头文件，其余三人当天无法开工——这一条是 v1.0 说明书暴露的瓶颈，v1.1 用"头文件先行 + db.c 收窄为通用封装"解决。
 
 ### 13.2 交付物清单
 
@@ -1798,19 +1800,21 @@ static const int legal[][2] = {
 - 0 是唯一可迁出的状态；1、2、3 都是终态
 - 任何非法迁移返回 `ERR_BAD_STATE`，UI 提示当前状态与目标状态的中文名
 - 改期不改变 status，因此不在迁移表中
-- 只有 0 → 2（取消）释放号源；0 → 1 和 0 → 3 都不释放
-- 迁移的附加条件（不是状态机的一部分，是业务规则）：0 → 2 要求操作者是本人患者或管理员；0 → 1 要求操作者是接诊医生本人；0 → 3 要求 `appoint_date < CURDATE()`
+- 只有 0 → 2（取消）释放号源：由 `appointment_set_status` 在状态更新成功后释放一次，`appointment_cancel` 和其他调用方不得重复释放；0 → 1 和 0 → 3 都不释放
+- `appointment_set_status` 内部校验登录身份及附加条件：0 → 2 要求操作者是本人患者或管理员；0 → 1 要求操作者是接诊医生本人；0 → 3 要求操作者是管理员或该预约的归属医生，且 `appoint_date < CURDATE()`。身份或归属不符返回 `ERR_PERM`
+- 事务仍由业务发起函数管理，`appointment_set_status` 不开、提交或回滚事务；任一步失败由调用方回滚。接诊由 B 的 `visit_take` 在同一事务内先写就诊记录，再调用此入口
 
 实现形态（评审时按此检查，不要写成嵌套 if-else）：
 
 ```c
 int appointment_set_status(int appoint_id, int new_status, const char *reason)
 {
-    /* 1. 查出当前 status，不存在返回 ERR_NOT_FOUND
-       2. 查 legal 表，未命中返回 ERR_BAD_STATE
+    /* 1. 校验登录，查出预约，不存在返回 ERR_NOT_FOUND
+       2. 校验角色、归属与日期；查 legal 表，非法迁移返回 ERR_BAD_STATE
        3. 条件 UPDATE：SET status=? WHERE appoint_id=? AND status=?
           影响行数为 0 返回 ERR_BAD_STATE（并发兜底）
-       4. 若 new_status == APPT_CANCELED，调 schedule_release_quota */
+       4. 若 new_status == APPT_CANCELED 且 schedule_id > 0，
+          调 schedule_release_quota 一次；错误交给外层事务回滚 */
 }
 ```
 
