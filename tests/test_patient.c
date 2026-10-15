@@ -201,8 +201,8 @@ static void test_patient_db_flow(void)
     patient_t p, p2, got;
     patient_t *list = NULL;
     char pid[PID_LEN], pid2[PID_LEN], pid_tmp[PID_LEN];
-    int n = 0, total = 0, k;
     const char *kw3[3] = {"UTPCT%ZZZ", "UTUND_QQQ", "UTBSL\\WWW"};
+    int n = 0, total = 0, k;
     wipe_ut("UTID%");
     register_ut_patient(&p, "UTID000001", "归档患者UT", pid);
     register_ut_patient(&p2, "UTID000002", "旁证患者UT", pid2);
@@ -232,16 +232,17 @@ static void test_patient_db_flow(void)
     ASSERT_EQ(n, 1);
     ASSERT_EQ(total, 1);
     patient_list_free(list);
-    /* P2-2：% _ \ 按字面量匹配（FR-CMN-01）。% 与 _ 各配一条"无特殊字符"的对照记录，
-       转义失效时通配符会连对照一起命中；关键字带 UT 前缀，避开种子里已有的"%字面量"夹具。 */
+    /* P2-2：% / _ / \ 按字面量匹配，各配一条不含该字符的对照记录 */
     register_ut_patient(&p2, "UTID000003", "UTPCT%ZZZ", pid_tmp);
-    register_ut_patient(&p2, "UTID000004", "UTPCTXXXZZZ", pid_tmp);
+    register_ut_patient(&p2, "UTID000004", "UTPCTXXXZZZ", pid_tmp); /* 对照：不含 % */
     register_ut_patient(&p2, "UTID000005", "UTUND_QQQ", pid_tmp);
-    register_ut_patient(&p2, "UTID000006", "UTUNDYQQQ", pid_tmp);
+    register_ut_patient(&p2, "UTID000006", "UTUNDYQQQ", pid_tmp); /* 对照：不含 _ */
     register_ut_patient(&p2, "UTID000007", "UTBSL\\WWW", pid_tmp);
+    register_ut_patient(&p2, "UTID000008", "UTBSLWWW", pid_tmp); /* 对照：不含 \ */
     for (k = 0; k < 3; k++) {
         ASSERT_RC(patient_query_all(kw3[k], 1, &list, &n, &total));
-        ASSERT_EQ(total, 1); /* 对照记录没被通配符带上 */
+        ASSERT_EQ(total, 1); /* 多出对照就是转义漏了，顶替成对照则由下一条拦下 */
+        ASSERT_STR_EQ(list[0].name, kw3[k]); /* 命中名必须仍是字面那条，不是对照 */
         patient_list_free(list);
     }
     g_session.role = ROLE_PATIENT;

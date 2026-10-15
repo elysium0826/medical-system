@@ -210,7 +210,7 @@ int page_normalize(int page);
 int page_offset(int page);
 /* 总页数，total 小于 1 时返回 1 */
 int page_count(int total);
-void like_escape(const char *in, char *out, int outlen); /* db_escape 后再转义 % 和 _ */
+void like_escape(const char *in, char *out, int outlen); /* db_escape 后再补一层 LIKE 转义 */
 
 /* 断言支持函数，实现在 common.c，供 tests/ 通过下面的宏使用 */
 void assert_eq_int(const char *file, int line, const char *expr, long long actual,

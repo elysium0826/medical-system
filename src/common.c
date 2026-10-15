@@ -180,7 +180,9 @@ int page_count(int total)
     return total < 1 ? 1 : 1 + (total - 1) / PAGE_SIZE;
 }
 
-/* 入参已经 db_escape；双反斜杠经 SQL 字面量解析后保留 LIKE 转义字符。 */
+/* 入参已经 db_escape：用户的 \ 在这里成对出现，' 等已经成了 \x。
+   再补一层给 LIKE 用：% _ 各补一个 \，成对的 \ 再翻倍；db_escape 自己生成的 \x 原样保留，
+   否则会把引号前的 \ 一起改掉，字符串字面量提前收尾。 */
 void like_escape(const char *in, char *out, int outlen)
 {
     size_t i, n = 0;
@@ -193,7 +195,14 @@ void like_escape(const char *in, char *out, int outlen)
         return;
     }
     for (i = 0; in[i] != '\0'; i++) {
-        n += (in[i] == '%' || in[i] == '_') ? 3 : 1;
+        if (in[i] == '\\' && in[i + 1] == '\\') {
+            n += 4;
+            i++;
+        } else if (in[i] == '%' || in[i] == '_') {
+            n += 3;
+        } else {
+            n += 1;
+        }
     }
     if (n >= (size_t)outlen) {
         fprintf(stderr, "like_escape: 输出缓冲区不足\n");
@@ -201,6 +210,14 @@ void like_escape(const char *in, char *out, int outlen)
     }
     n = 0;
     for (i = 0; in[i] != '\0'; i++) {
+        if (in[i] == '\\' && in[i + 1] == '\\') {
+            out[n++] = '\\';
+            out[n++] = '\\';
+            out[n++] = '\\';
+            out[n++] = '\\';
+            i++;
+            continue;
+        }
         if (in[i] == '%' || in[i] == '_') {
             out[n++] = '\\';
             out[n++] = '\\';
