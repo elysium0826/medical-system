@@ -1,6 +1,6 @@
 /*
  * test_admin.c  管理员角色结构冒烟
- * 作者：C   创建：2026-10-14
+ * 作者：shangshuo   创建：2026-10-14
  */
 
 #include "doctor.h"
@@ -99,7 +99,7 @@ static void test_medicine_update_price(void)
 
 static void test_medicine_change_stock(void)
 {
-    assert(medicine_change_stock("MED001", 1, 1, "smoke", "admin") == ERR_PARAM);
+    assert(medicine_change_stock("MED001", 1, 1, "smoke", "admin") == ERR_PERM);
 }
 
 static void test_medicine_set_status(void)
@@ -109,12 +109,12 @@ static void test_medicine_set_status(void)
 
 static void test_medicine_stock_in(void)
 {
-    assert(medicine_stock_in("MED001", 1, "admin") == ERR_PARAM);
+    assert(medicine_stock_in("MED001", 1, "admin") == ERR_PERM);
 }
 
 static void test_medicine_stock_out(void)
 {
-    assert(medicine_stock_out("MED001", 1, "admin") == ERR_PARAM);
+    assert(medicine_stock_out("MED001", 1, "admin") == ERR_PERM);
 }
 
 static void test_medicine_check_stock(void)
