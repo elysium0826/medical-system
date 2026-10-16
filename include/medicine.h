@@ -1,5 +1,5 @@
 /* medicine.h  药品档案、库存变化、流水查询与盘点接口（M06 / M10，owner: C）
- * 作者：C   创建：2026-10-14   骨架：D */
+ * 作者：shangshuo   创建：2026-10-14   骨架：D */
 #ifndef MED_MEDICINE_H
 #define MED_MEDICINE_H
 
@@ -28,7 +28,8 @@ int medicine_update_price(const char *med_id, double new_price);
    0 表示只留痕（此时 change_type 必须为 STOCK_VOID）。条件 UPDATE 限定
    stock + delta >= 0，影响 0 行且 delta < 0 时返回 ERR_STOCK_LOW。
    before_stock 与 after_stock 都以数据库实际值为准。
-   内部禁止事务控制，由 prescription_add / medicine_check_stock 的事务包裹。 */
+   调用前必须由业务发起方开启事务，失败后由其回滚；内部禁止事务控制。
+   停用药也允许写流水；operator 必须与当前登录账号一致。 */
 int medicine_change_stock(const char *med_id, int delta, int change_type, const char *ref_id,
                           const char *operator);
 
@@ -36,7 +37,8 @@ int medicine_change_stock(const char *med_id, int delta, int change_type, const 
 int medicine_set_status(const char *med_id, int new_status);
 
 /* v1.0 兼容入口，内部改为调 medicine_change_stock（类型 1 / 2），
-   对外签名不变（FR-M10-01 第 7 条）。 */
+   对外签名不变（FR-M10-01 第 7 条）。数量必须大于 0。
+   这两个入口也不管理事务，调用方必须开启事务并处理回滚；菜单接入前由 D 确认事务归属。 */
 int medicine_stock_in(const char *med_id, int quantity, const char *operator);
 int medicine_stock_out(const char *med_id, int quantity, const char *operator);
 
