@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* 库存写入、盘点和流水接口仍为未实现桩。 */
+/* 新增药品、调价、盘点和流水查询尚未实现。 */
 
 int medicine_add(const medicine_t *m, char *out_med_id)
 {
@@ -29,15 +29,121 @@ int medicine_update_price(const char *med_id, double new_price)
     return ERR_PARAM;
 }
 
+static int stock_request_check(const char *med_id, int delta, int change_type, const char *ref_id,
+                               const char *operator)
+{
+    int rc;
+
+    if (str_empty(med_id) || str_empty(operator))
+        return ERR_PARAM;
+    if (strlen(med_id) >= PID_LEN || strlen(operator) > 20)
+        return ERR_PARAM;
+    if (ref_id != NULL && strlen(ref_id) >= PID_LEN)
+        return ERR_PARAM;
+    if (change_type < STOCK_IN || change_type > STOCK_VOID)
+        return ERR_PARAM;
+    if (delta == 0 && change_type != STOCK_VOID)
+        return ERR_PARAM;
+    if (change_type == STOCK_VOID && delta != 0)
+        return ERR_PARAM;
+
+    if (!session_is_login())
+        return ERR_PERM;
+    rc = session_check_timeout();
+    if (rc != 0)
+        return rc;
+    if (g_session.role != ROLE_ADMIN && g_session.role != ROLE_DOCTOR)
+        return ERR_PERM;
+    if (g_session.role == ROLE_DOCTOR && change_type != STOCK_PRESC && change_type != STOCK_VOID)
+        return ERR_PERM;
+    if (strcmp(operator, g_session.username) != 0)
+        return ERR_PERM;
+
+    return 0;
+}
+
+static int stock_read(const char *escaped_id, int *stock)
+{
+    db_result_t *rs = NULL;
+    char sql[SQL_BUF];
+    int rc;
+
+    /* 锁住药品记录，直到调用方提交或回滚事务。停用药也能留历史流水。 */
+    snprintf(sql, sizeof(sql), "SELECT stock FROM t_medicine WHERE med_id='%s' FOR UPDATE",
+             escaped_id);
+    rc = db_query(sql, &rs);
+    if (rc != 0)
+        return rc;
+    if (rs->rows == 0) {
+        db_result_free(rs);
+        return ERR_NOT_FOUND;
+    }
+
+    *stock = atoi(db_get(rs, 0, 0));
+    db_result_free(rs);
+    return 0;
+}
+
 int medicine_change_stock(const char *med_id, int delta, int change_type, const char *ref_id,
                           const char *operator)
 {
-    (void)med_id;
-    (void)delta;
-    (void)change_type;
-    (void)ref_id;
-    (void)operator;
-    return ERR_PARAM;
+    const char *remarks[] = {"", "入库", "出库", "处方扣减", "盘盈", "盘亏", "作废留痕"};
+    char escaped_id[PID_LEN * 2 + 1];
+    char escaped_ref[PID_LEN * 2 + 1];
+    char escaped_operator[NAME_LEN * 2 + 1];
+    char sql[SQL_BUF];
+    unsigned long long affected = 0;
+    int before_stock;
+    int after_stock;
+    int rc;
+
+    /* 检查参数、登录状态和操作人。 */
+    rc = stock_request_check(med_id, delta, change_type, ref_id, operator);
+    if (rc != 0)
+        return rc;
+    if (ref_id == NULL)
+        ref_id = "";
+
+    /* 查修改前的库存，数量不能超过整数上限。 */
+    db_escape(med_id, escaped_id, sizeof(escaped_id));
+    rc = stock_read(escaped_id, &before_stock);
+    if (rc != 0)
+        return rc;
+    if ((long long)before_stock + delta > INT_MAX)
+        return ERR_PARAM;
+
+    /* 修改库存；作废时数量为零，跳过更新。 */
+    if (delta != 0) {
+        snprintf(sql, sizeof(sql),
+                 "UPDATE t_medicine SET stock=stock+(%d), update_time=NOW() "
+                 "WHERE med_id='%s' AND stock+(%d)>=0",
+                 delta, escaped_id, delta);
+        rc = db_exec(sql, &affected);
+        if (rc != 0)
+            return rc;
+        if (affected == 0) {
+            if (delta < 0)
+                return ERR_STOCK_LOW;
+            return ERR_DB_EXEC;
+        }
+    }
+
+    /* 查修改后的实际库存。 */
+    rc = stock_read(escaped_id, &after_stock);
+    if (rc != 0)
+        return rc;
+
+    /* 记录这次变化，失败时由调用方回滚整个事务。 */
+    db_escape(ref_id, escaped_ref, sizeof(escaped_ref));
+    db_escape(operator, escaped_operator, sizeof(escaped_operator));
+    snprintf(sql, sizeof(sql),
+             "INSERT INTO t_stock_log "
+             "(med_id,change_type,quantity,before_stock,after_stock,ref_id,operator,remark,"
+             "create_time) "
+             "VALUES('%s',%d,%d,%d,%d,'%s','%s','%s',NOW())",
+             escaped_id, change_type, delta, before_stock, after_stock, escaped_ref,
+             escaped_operator, remarks[change_type]);
+    return db_exec(sql, NULL);
 }
 
 int medicine_set_status(const char *med_id, int new_status)
@@ -49,18 +155,16 @@ int medicine_set_status(const char *med_id, int new_status)
 
 int medicine_stock_in(const char *med_id, int quantity, const char *operator)
 {
-    (void)med_id;
-    (void)quantity;
-    (void)operator;
-    return ERR_PARAM;
+    if (quantity <= 0)
+        return ERR_PARAM;
+    return medicine_change_stock(med_id, quantity, STOCK_IN, "", operator);
 }
 
 int medicine_stock_out(const char *med_id, int quantity, const char *operator)
 {
-    (void)med_id;
-    (void)quantity;
-    (void)operator;
-    return ERR_PARAM;
+    if (quantity <= 0)
+        return ERR_PARAM;
+    return medicine_change_stock(med_id, -quantity, STOCK_OUT, "", operator);
 }
 
 int medicine_check_stock(const char *med_id, int actual, const char *batch, const char *operator)
