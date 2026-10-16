@@ -2,6 +2,7 @@
  * 作者：D   创建：2026-10-14 */
 #include "common.h"
 #include "ui.h"
+#include "ui_account.h"
 #include "user.h"
 
 #include <ctype.h>
@@ -484,10 +485,14 @@ int ui_login(void)
     for (;;) {
         clear_screen();
         print_title("社区医疗系统 v1.1（开发骨架）");
-        printf("1. 管理员登录\n2. 医生登录\n3. 患者登录\n0. 退出系统\n");
-        role = read_choice("请输入选项[0-3]：", 0, 3);
+        printf("  1. 管理员登录\n  2. 医生登录\n  3. 患者登录\n  4. 患者注册\n  0. 退出系统\n");
+        role = read_choice("请输入选项[0-4]：", 0, 4);
         if (role <= 0) {
             return ROLE_NONE;
+        }
+        if (role == 4) {
+            ui_register_patient();
+            continue;
         }
         if (read_line("账号：", name, sizeof(name)) != 0) {
             if (feof(stdin)) {
