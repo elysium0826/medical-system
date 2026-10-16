@@ -3,6 +3,7 @@
  * 作者：A   创建：2026-10-14
  */
 #include "ui.h"
+#include "ui_account.h"
 
 #include "appointment.h"
 #include "patient.h"
@@ -229,8 +230,9 @@ void ui_patient_main(void)
         }
         session_touch();
         print_title("患者端");
-        printf("  1. 今日待办\n  2. 患者档案\n  3. 预约挂号\n  4. 排班号源\n  0. 退出\n");
-        choice = read_choice("请输入选项[0-4]：", 0, 4);
+        printf("  1. 今日待办\n  2. 患者档案\n  3. 预约挂号\n  4. 排班号源\n");
+        printf("  5. 修改密码\n  0. 退出\n");
+        choice = read_choice("请输入选项[0-5]：", 0, 5);
         if (choice < 0)
             return;
         rc = session_check_timeout();
@@ -253,6 +255,9 @@ void ui_patient_main(void)
             break;
         case 4:
             patient_schedule_menu();
+            break;
+        case 5:
+            ui_change_password();
             break;
         }
     }

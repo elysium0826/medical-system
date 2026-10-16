@@ -3,6 +3,7 @@
  * 作者：B   创建：2026-10-14
  */
 #include "ui.h"
+#include "ui_account.h"
 
 #include "medical_record.h"
 #include "prescription.h"
@@ -59,8 +60,8 @@ void ui_doctor_main(void)
         session_touch();
         print_title("医生端");
         printf("  1. 今日待办\n  2. 接诊记录\n  3. 处方与模板\n  4. 病历书写与打印\n");
-        printf("  0. 退出\n");
-        choice = read_choice("请输入选项[0-4]：", 0, 4);
+        printf("  5. 修改密码\n  0. 退出\n");
+        choice = read_choice("请输入选项[0-5]：", 0, 5);
         if (choice < 0)
             return;
         rc = session_check_timeout();
@@ -83,6 +84,9 @@ void ui_doctor_main(void)
             break;
         case 4:
             doctor_record_menu();
+            break;
+        case 5:
+            ui_change_password();
             break;
         }
     }
